@@ -1,14 +1,30 @@
+# Core Web App
 streamlit
+pandas
+numpy
+requests
+
+# Database
 pymongo
 python-dotenv
-yfinance
-vaderSentiment
-pandas
-requests
-beautifulsoup4
-snscrape
-spacy
-networkx
-scikit-learn
-xgboost
+
+# NLP & ML
+transformers
+torch
 openai
+
+# Web Scraping
+beautifulsoup4
+newspaper3k
+lxml
+html5lib
+
+# Optional Visualization
+matplotlib
+plotly
+
+# Date/Time Utilities
+python-dateutil
+
+# For web scraping (if you scrape news sites directly)
+tqdm
