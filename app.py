@@ -10,13 +10,14 @@ from src.nlp_sentiment_predictor import nlp_sentiment_pipeline
 from datetime import datetime
 import google.generativeai as genai
 import os
+import plotly.graph_objects as go
+import yfinance as yf # Import yfinance for Company Profile
 
 # Configure Gemini
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 if not os.getenv("GEMINI_API_KEY"):
     st.error("❌ GEMINI_API_KEY environment variable is NOT set.")
-# 💡 FIX: Changed model to the generally available and recommended 'gemini-2.5-flash'
-# This helps prevent the 404 error from a potentially unaliased model name.
+
 gemini_model = genai.GenerativeModel("gemini-2.5-flash") 
 
 # Page Configuration
@@ -37,14 +38,6 @@ st.markdown("""
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
         margin-bottom: 0.5rem;
-    }
-    .metric-card {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        padding: 1.5rem;
-        border-radius: 20px;
-        color: white;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-        
     }
     .stTabs [data-baseweb="tab-list"] {
         gap: 24px;
@@ -115,7 +108,7 @@ with st.sidebar:
         "Historical Data Period",
         options=['1mo', '3mo', '6mo', '1y', '2y', '5y'],
         index=3,
-        help="Amount of historical data to fetch"
+        help="Amount of historical data to fetch (Min 6mo recommended for AI)"
     )
     
     st.divider()
@@ -185,16 +178,18 @@ else:
     # Main Analysis Interface
     st.markdown(f"## Analysis for **{ticker}**")
     
-    # 💡 FIX: Determine currency symbol
+    # Determine currency symbol
     currency_symbol = "₹" if ticker.endswith(".NS") else "$"
     
     # Create tabs for different views
-    tab1, tab2, tab3, tab4,tab5 = st.tabs([
+    # 💡 ADDED A NEW TAB for Company Profile
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
         "📊 Historical Data",
         "🔮 AI Predictions",
         "📰 Data and Tally",
         "📈 Technical Indicators",
-        "🧩 Summary Insights"
+        "🧩 Summary Insights",
+        "🏢 Company Profile"
     ])
     
     # ----------------------------
@@ -222,75 +217,100 @@ else:
                 return today - timedelta(days=1825)
             else:
                 return today - timedelta(days=365) # Default to 1 year
-
+        
+        # 💡 --- FIX: SEPARATED DATA FETCHING FROM DISPLAY --- 💡
+        
+        # Part 1: Data Fetching (runs only when button is pressed)
         if refresh_data or run_analysis or st.button("Load Historical Data", key="load_hist"):
             try:
-                # Calculate start_date based on the lookback_period
                 start_date = get_start_date_from_period(lookback_period)
                 start_date_str = start_date.strftime('%Y-%m-%d')
                 
                 with st.spinner(f'Fetching data since {start_date_str} for {ticker}...'):
-                    # Call the function with 'start' instead of 'period'
                     df = get_stock_data(ticker, start=start_date_str)
                 
                 if df is None or df.empty:
                     st.error(f'Could not find stock data for ticker: **{ticker}**')
+                    # Clear session state if data fetch fails
+                    if 'stock_data' in st.session_state:
+                        del st.session_state.stock_data
                 else:
-                    st.success(f'✅ Successfully fetched {len(df)} rows of data for the selected period')
-                    
+                    st.success(f'✅ Successfully fetched {len(df)} rows of data')
                     # Store in session state
                     st.session_state.stock_data = df
                     
-                    # Handle MultiIndex columns
-                    if isinstance(df.columns, pd.MultiIndex):
-                        df.columns = df.columns.to_flat_index()
-                        df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
-                    
-                    # Display metrics
-                    col1, col2, col3, col4 = st.columns(4)
-                    
-                    with col1:
-                        if 'Close' in df.columns:
-                            current_price = df['Close'].iloc[-1]
-                            # 💡 FIX: Use currency_symbol
-                            st.metric("Current Price", f"{currency_symbol}{current_price:.2f}")
-                    
-                    with col2:
-                        if 'Close' in df.columns and len(df) > 1: 
-                            day_change = df['Close'].iloc[-1] - df['Close'].iloc[-2]
-                            day_change_pct = (day_change / df['Close'].iloc[-2]) * 100
-                            # 💡 FIX: Use currency_symbol
-                            st.metric("Day Change", f"{currency_symbol}{day_change:.2f}", f"{day_change_pct:+.2f}%")
-                    
-                    with col3:
-                        if 'High' in df.columns:
-                            period_high = df['High'].max()
-                            # 💡 FIX: Use currency_symbol
-                            st.metric(f"Period High ({lookback_period})", f"{currency_symbol}{period_high:.2f}")
-                    
-                    with col4:
-                        if 'Volume' in df.columns:
-                            avg_volume = df['Volume'].tail(20).mean()
-                            st.metric("Avg Volume (20D)", f"{avg_volume/1e6:.2f}M")
-                    
-                    # Data table
-                    st.divider()
-                    st.subheader(f"Data Table ({lookback_period})")
-                    st.dataframe(
-                        df,
-                        use_container_width=True,
-                        height=400
-                    )
-                    
-                    # Price chart
-                    if 'Close' in df.columns and not df.isnull().all()['Close']:
-                        st.divider()
-                        st.subheader(f"Price History ({lookback_period})")
-                        st.line_chart(df['Close'], use_container_width=True)
-                    
+                    # Also fetch and store profile info
+                    with st.spinner("Fetching company profile..."):
+                        stock_info = yf.Ticker(ticker).info
+                        st.session_state.stock_info = stock_info
+
             except Exception as e:
                 st.error(f'❌ Error fetching stock data: {e}')
                 st.exception(e)
+                if 'stock_data' in st.session_state:
+                    del st.session_state.stock_data
+
+        # Part 2: Data Display (runs every time if data exists in session)
+        if 'stock_data' in st.session_state:
+            df = st.session_state.stock_data
+            
+            # Handle MultiIndex columns (just in case)
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.to_flat_index()
+                df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
+            
+            # Display metrics
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                current_price = df['Close'].iloc[-1]
+                st.metric("Current Price", f"{currency_symbol}{current_price:.2f}")
+            with col2:
+                day_change = df['Close'].iloc[-1] - df['Close'].iloc[-2]
+                day_change_pct = (day_change / df['Close'].iloc[-2]) * 100
+                st.metric("Day Change", f"{currency_symbol}{day_change:.2f}", f"{day_change_pct:+.2f}%")
+            with col3:
+                period_high = df['High'].max()
+                st.metric(f"Period High ({lookback_period})", f"{currency_symbol}{period_high:.2f}")
+            with col4:
+                avg_volume = df['Volume'].tail(20).mean()
+                st.metric("Avg Volume (20D)", f"{avg_volume/1e6:.2f}M")
+            
+            # Data table
+            st.divider()
+            st.subheader(f"Data Table ({lookback_period})")
+            st.dataframe(df, use_container_width=True, height=400)
+            
+            # Price chart
+            st.divider()
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.subheader(f"Price History ({lookback_period})")
+            with col2:
+                chart_type_tab1 = st.radio(
+                    "Select Chart Type",
+                    ["Line", "Candlestick"],
+                    horizontal=True,
+                    key="chart_toggle_tab1",
+                    label_visibility="collapsed"
+                )
+
+            if chart_type_tab1 == "Line":
+                st.line_chart(df['Close'], use_container_width=True)
+            else:
+                fig = go.Figure(data=[go.Candlestick(
+                    x=df.index,
+                    open=df['Open'],
+                    high=df['High'],
+                    low=df['Low'],
+                    close=df['Close'],
+                    name=ticker
+                )])
+                fig.update_layout(
+                    xaxis_rangeslider_visible=False,
+                    yaxis_title=f"Price ({currency_symbol})"
+                )
+                st.plotly_chart(fig, use_container_width=True)
+        # 💡 --- END OF FIX --- 💡
                 
     # ----------------------------
     # TAB 2: AI Predictions
@@ -299,81 +319,62 @@ else:
         st.subheader(f"🔮 AI-Powered Price Predictions - {ticker}")
         
         if run_analysis or st.button("Generate Predictions", key="gen_pred", type="primary"):
-            try:
-                with st.spinner(f'🧠 Running AI analysis for {ticker}...'):
-                    # Run the full NLP sentiment pipeline with ML predictions
-                    analyzed_df, prediction, fig = nlp_sentiment_pipeline(
-                        ticker, 
-                        forecast_days=forecast_days, 
-                        lookback_period=lookback_period
-                    )
-                
-                if fig is None:
-                    st.error("Could not generate predictions. Please check the ticker symbol and try again.")
-                else:
-                    # Store in session state
-                    st.session_state.prediction = prediction
-                    st.session_state.prediction_fig = fig
-                    st.session_state.analyzed_df = analyzed_df
-                    
-                    # Display prediction metrics
-                    st.success("✅ Prediction generated successfully!")
-                    
-                    col1, col2, col3, col4 = st.columns(4)
-                    
-                    with col1:
-                        trend_emoji = "📈" if "Bullish" in prediction.get('trend', '') else "📉" if "Bearish" in prediction.get('trend', '') else "➖"
-                        st.metric("Trend", prediction.get('trend', 'N/A'))
-                    
-                    with col2:
-                        sentiment = prediction.get('avg_sentiment', 0)
-                        st.metric("Sentiment Score", f"{sentiment:+.3f}")
-                    
-                    with col3:
-                        st.metric(
-                            "7-Day Target",
-                            prediction.get('target_7d', 'N/A'),
-                            prediction.get('predicted_change_7d', 'N/A')
+            
+            if lookback_period in ['1mo', '3mo']:
+                st.error("❌ Insufficient Data for AI. Please select a 'Historical Data Period' of 6mo or more to run predictions.")
+            else:
+                try:
+                    with st.spinner(f'🧠 Running AI analysis for {ticker}...'):
+                        analyzed_df, prediction, fig = nlp_sentiment_pipeline(
+                            ticker, 
+                            forecast_days=forecast_days, 
+                            lookback_period=lookback_period
                         )
                     
-                    with col4:
-                        st.metric(
-                            "30-Day Target",
-                            prediction.get('target_30d', 'N/A'),
-                            prediction.get('predicted_change_30d', 'N/A')
-                        )
-                    
-                    # Display confidence
-                    st.divider()
-                    confidence = prediction.get('confidence', 'Unknown')
-                    if confidence == 'High':
-                        st.success(f"🎯 Confidence Level: **{confidence}**")
-                    elif confidence == 'Medium':
-                        st.info(f"📊 Confidence Level: **{confidence}**")
+                    if fig is None:
+                        st.error("Could not generate predictions. Please check the ticker symbol and try again.")
                     else:
-                        st.warning(f"⚠️ Confidence Level: **{confidence}**")
-                    
-                    # Display the prediction visualization
-                    st.divider()
-                    st.plotly_chart(fig, use_container_width=True)
-                    
-                    # Additional insights
-                    with st.expander("📋 Prediction Details"):
-                        st.json(prediction)
-                    
-                    # Download option
-                    st.divider()
-                    if st.button("💾 Save Prediction Chart"):
-                        import os
-                        os.makedirs("predictions", exist_ok=True)
-                        fig.write_html(f"predictions/{ticker}_forecast_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html")
-                        st.success(f"✅ Chart saved to predictions/{ticker}_forecast.html")
+                        st.session_state.prediction = prediction
+                        st.session_state.prediction_fig = fig
+                        st.session_state.analyzed_df = analyzed_df
                         
-            except Exception as e:
-                st.error(f"❌ Error generating predictions: {e}")
-                st.exception(e)
+                        st.success("✅ Prediction generated successfully!")
+                        
+                        col1, col2, col3, col4 = st.columns(4)
+                        with col1:
+                            st.metric("Trend", prediction.get('trend', 'N/A'))
+                        with col2:
+                            st.metric("Sentiment Score", f"{prediction.get('avg_sentiment', 0):+.3f}")
+                        with col3:
+                            st.metric("7-Day Target", prediction.get('target_7d', 'N/A'), prediction.get('predicted_change_7d', 'N/A'))
+                        with col4:
+                            st.metric("30-Day Target", prediction.get('target_30d', 'N/A'), prediction.get('predicted_change_30d', 'N/A'))
+                        
+                        st.divider()
+                        confidence = prediction.get('confidence', 'Unknown')
+                        if confidence == 'High':
+                            st.success(f"🎯 Confidence Level: **{confidence}**")
+                        elif confidence == 'Medium':
+                            st.info(f"📊 Confidence Level: **{confidence}**")
+                        else:
+                            st.warning(f"⚠️ Confidence Level: **{confidence}**")
+                        
+                        st.divider()
+                        st.plotly_chart(fig, use_container_width=True)
+                        
+                        with st.expander("📋 Prediction Details"):
+                            st.json(prediction)
+                        
+                        st.divider()
+                        if st.button("💾 Save Prediction Chart"):
+                            os.makedirs("predictions", exist_ok=True)
+                            fig.write_html(f"predictions/{ticker}_forecast_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html")
+                            st.success(f"✅ Chart saved to predictions/{ticker}_forecast.html")
+                            
+                except Exception as e:
+                    st.error(f"❌ Error generating predictions: {e}")
+                    st.exception(e)
         
-        # Display cached prediction if available
         elif 'prediction_fig' in st.session_state:
             st.info("Showing cached prediction. Click 'Generate Predictions' to update.")
             st.plotly_chart(st.session_state.prediction_fig, use_container_width=True)
@@ -387,7 +388,6 @@ else:
         if run_analysis or st.button("Fetch Latest News", key="fetch_news"):
             try:
                 with st.spinner(f'Fetching and analyzing news for {ticker}...'):
-                    # Fetch fresh news
                     news_df = scrape_multiple_news(ticker, limit=10)
                     
                     if news_df.empty:
@@ -395,7 +395,6 @@ else:
                     else:
                         st.success(f"✅ Found {len(news_df)} news articles")
                         
-                        # Store to database if available
                         if db_available:
                             collection = db.get_collection("news_articles")
                             data_to_insert = news_df.to_dict(orient="records")
@@ -405,14 +404,11 @@ else:
                             collection.insert_many(data_to_insert)
                             st.info("📦 News articles saved to database")
                         
-                        # Display analyzed sentiment from prediction
                         if 'analyzed_df' in st.session_state and not st.session_state.analyzed_df.empty:
                             analyzed_df = st.session_state.analyzed_df
                             
-                            # Sentiment distribution
                             st.divider()
                             st.subheader("Sentiment Distribution")
-                            
                             sentiment_counts = analyzed_df['sentiment'].value_counts()
                             col1, col2, col3 = st.columns(3)
                             
@@ -426,13 +422,10 @@ else:
                                 negative = sentiment_counts.get('negative', 0) + sentiment_counts.get('NEGATIVE', 0)
                                 st.metric("🔴 Negative", negative)
                             
-                            # Detailed breakdown
                             st.divider()
                             st.subheader("Detailed Sentiment Breakdown")
-                            
                             display_df = analyzed_df[['title', 'sentiment', 'score', 'sentiment_value', 'source']].copy()
                             
-                            # Color code sentiment
                             def highlight_sentiment(row):
                                 if row['sentiment_value'] > 0:
                                     return ['background-color: #008B8B'] * len(row)
@@ -452,7 +445,6 @@ else:
             except Exception as e:
                 st.error(f"❌ Error analyzing sentiment: {e}")
         
-        # Display cached sentiment if available
         elif 'analyzed_df' in st.session_state and not st.session_state.analyzed_df.empty:
             st.info("Showing cached sentiment analysis. Click 'Fetch Latest News' to update.")
             analyzed_df = st.session_state.analyzed_df
@@ -467,29 +459,60 @@ else:
     with tab4:
         st.subheader(f"📈 Technical Indicators - {ticker}")
         
+        # 💡 FIX: This display logic must also be outside the button press
         if 'stock_data' in st.session_state:
-            df = st.session_state.stock_data.copy() # Use .copy() to avoid modifying session state
+            df = st.session_state.stock_data.copy()
             
-            # Calculate basic indicators
             if 'Close' in df.columns:
                 df['MA_20'] = df['Close'].rolling(window=20).mean()
                 df['MA_50'] = df['Close'].rolling(window=50).mean()
                 df['MA_200'] = df['Close'].rolling(window=200).mean()
                 
-                # Display chart
-                st.line_chart(df[['Close', 'MA_20', 'MA_50', 'MA_200']].tail(252))
-                
-                # Current indicator values
-                col1, col2, col3 = st.columns(3)
-                
+                col1, col2 = st.columns([3, 1])
                 with col1:
-                    # 💡 FIX: Use currency_symbol
+                    st.subheader("Price vs. Moving Averages")
+                with col2:
+                    chart_type_tab4 = st.radio(
+                        "Select Chart Type",
+                        ["Line", "Candlestick"],
+                        horizontal=True,
+                        key="chart_toggle_tab4",
+                        label_visibility="collapsed"
+                    )
+
+                chart_df = df.tail(252)
+
+                if chart_type_tab4 == "Line":
+                    st.line_chart(chart_df[['Close', 'MA_20', 'MA_50', 'MA_200']], use_container_width=True)
+                else:
+                    fig = go.Figure()
+                    fig.add_trace(go.Candlestick(
+                        x=chart_df.index,
+                        open=chart_df['Open'],
+                        high=chart_df['High'],
+                        low=chart_df['Low'],
+                        close=chart_df['Close'],
+                        name="Price"
+                    ))
+                    fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['MA_20'], mode='lines', name='MA 20', line=dict(color='yellow', width=1)))
+                    fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['MA_50'], mode='lines', name='MA 50', line=dict(color='orange', width=1)))
+                    fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['MA_200'], mode='lines', name='MA 200', line=dict(color='red', width=1)))
+                    
+                    fig.update_layout(
+                        xaxis_rangeslider_visible=False,
+                        yaxis_title=f"Price ({currency_symbol})",
+                        legend_title="Legend"
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                
+                st.divider()
+                st.subheader("Current Indicator Values")
+                col1, col2, col3 = st.columns(3)
+                with col1:
                     st.metric("20-Day MA", f"{currency_symbol}{df['MA_20'].iloc[-1]:.2f}")
                 with col2:
-                    # 💡 FIX: Use currency_symbol
                     st.metric("50-Day MA", f"{currency_symbol}{df['MA_50'].iloc[-1]:.2f}")
                 with col3:
-                    # 💡 FIX: Use currency_symbol
                     st.metric("200-Day MA", f"{currency_symbol}{df['MA_200'].iloc[-1]:.2f}")
         else:
             st.info("Load historical data on the 'Historical Data' tab to see indicators.")
@@ -500,10 +523,8 @@ else:
     with tab5:
         st.subheader(f"🧩 AI-Powered Summary - {ticker}")
 
-        # Add a button to explicitly generate the summary
         if st.button("Generate AI Summary", key="gen_summary", type="primary", use_container_width=True):
             
-            # Check if we have the necessary data from other tabs
             if 'prediction' not in st.session_state or 'analyzed_df' not in st.session_state or 'stock_data' not in st.session_state:
                 st.warning("⚠️ Please run a 'Full Analysis' on the sidebar first to generate data for the summary.")
             
@@ -514,22 +535,16 @@ else:
                 try:
                     with st.spinner("🧠 Gemini is analyzing the data..."):
                         
-                        # --- 1. Gather all the data from session state ---
                         prediction_data = st.session_state.prediction
                         sentiment_df = st.session_state.analyzed_df
                         stock_df = st.session_state.stock_data
 
-                        # --- 2. Prepare key data points for the prompt ---
                         current_price = stock_df['Close'].iloc[-1]
                         day_change_pct = ((stock_df['Close'].iloc[-1] / stock_df['Close'].iloc[-2]) - 1) * 100
-                        
-                        # 💡 FIX: Use period high, not fixed 52w
                         period_high = stock_df['High'].max()
                         
                         trend = prediction_data.get('trend', 'N/A')
                         avg_sentiment = prediction_data.get('avg_sentiment', 0)
-                        
-                        # These values now come with the currency symbol from nlp_sentiment_predictor.py
                         target_30d = prediction_data.get('target_30d', 'N/A')
                         change_30d = prediction_data.get('predicted_change_30d', 'N/A')
                         confidence = prediction_data.get('confidence', 'N/A')
@@ -539,7 +554,6 @@ else:
                         neutral_count = int(sentiment_counts.get('neutral', 0) + sentiment_counts.get('NEUTRAL', 0))
                         negative_count = int(sentiment_counts.get('negative', 0) + sentiment_counts.get('NEGATIVE', 0))
                         
-                        # --- 3. Construct the Prompt ---
                         prompt = f"""
                         You are an expert financial analyst. Your task is to provide a concise, insightful summary for a retail investor based on the provided data for the stock ticker: {ticker}.
                         
@@ -570,23 +584,71 @@ else:
                         Format the output as clean markdown.
                         """
 
-                        # --- 4. Call Gemini API ---
                         response = gemini_model.generate_content(prompt)
-                        
-                        # --- 5. Display the output ---
                         st.markdown(response.text)
-                        
-                        # Cache the summary
                         st.session_state.gemini_summary = response.text
 
                 except Exception as e:
                     st.error(f"❌ Error generating Gemini summary: {e}")
                     st.exception(e)
         
-        # Display cached summary if it exists
         elif 'gemini_summary' in st.session_state:
             st.markdown(st.session_state.gemini_summary)
-            
         else:
-            # Initial state of the tab before the button is pressed
             st.info("Click the 'Generate AI Summary' button to get an AI-powered insight combining all analysis.")
+
+    # ----------------------------
+    # 💡 NEW TAB 6: Company Profile
+    # ----------------------------
+    with tab6:
+        st.subheader(f"🏢 Company Profile")
+        
+        # Check if profile data was loaded in Tab 1
+        if 'stock_info' not in st.session_state:
+            st.info("Please click 'Load Historical Data' in Tab 1 to fetch company profile.")
+        else:
+            stock_info = st.session_state.stock_info
+            
+            st.header(stock_info.get('longName', ticker))
+            
+            col1, col2 = st.columns(2)
+            with col1:
+                st.caption(f"**Sector:** {stock_info.get('sector', 'N/A')}")
+                st.caption(f"**Industry:** {stock_info.get('industry', 'N/A')}")
+            with col2:
+                st.caption(f"**Website:** {stock_info.get('website', 'N/A')}")
+                st.caption(f"**Country:** {stock_info.get('country', 'N/A')}")
+
+            st.divider()
+            
+            st.subheader("Business Summary")
+            st.markdown(stock_info.get('longBusinessSummary', 'No summary available.'))
+            
+            st.divider()
+            
+            st.subheader("Key Financials")
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Market Cap", f"{currency_symbol}{stock_info.get('marketCap', 0)/1e9:.2f}B")
+                st.metric("Enterprise Value", f"{currency_symbol}{stock_info.get('enterpriseValue', 0)/1e9:.2f}B")
+            with col2:
+                st.metric("Trailing P/E", f"{stock_info.get('trailingPE', 'N/A') if not isinstance(stock_info.get('trailingPE'), (int, float)) else f'{stock_info.get("trailingPE"):.2f}'}")
+                st.metric("Forward P/E", f"{stock_info.get('forwardPE', 'N/A') if not isinstance(stock_info.get('forwardPE'), (int, float)) else f'{stock_info.get("forwardPE"):.2f}'}")
+            with col3:
+                st.metric("Dividend Yield", f"{stock_info.get('dividendYield', 0) * 100:.2f}%")
+                st.metric("Beta", f"{stock_info.get('beta', 'N/A') if not isinstance(stock_info.get('beta'), (int, float)) else f'{stock_info.get("beta"):.2f}'}")
+            
+            st.divider()
+            
+            st.subheader("Analyst Recommendations")
+            try:
+                # Fetch recommendations on the fly for this tab
+                with st.spinner("Loading analyst recommendations..."):
+                    recs = yf.Ticker(ticker).recommendations
+                if recs is not None and not recs.empty:
+                    # Show only the last 10 recommendations
+                    st.dataframe(recs.tail(10), use_container_width=True)
+                else:
+                    st.info("No analyst recommendations available for this stock.")
+            except Exception as e:
+                st.warning(f"Could not load analyst recommendations: {e}")
