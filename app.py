@@ -204,15 +204,40 @@ else:
     with tab1:
         st.subheader(f"Historical Stock Data - {ticker}")
         
+        # 💡 FIX: Helper function to convert 'lookback_period' string to a start date
+        def get_start_date_from_period(period_str):
+            from datetime import datetime, timedelta
+            today = datetime.now()
+            
+            if period_str == '1mo':
+                return today - timedelta(days=30)
+            elif period_str == '3mo':
+                return today - timedelta(days=90)
+            elif period_str == '6mo':
+                return today - timedelta(days=182)
+            elif period_str == '1y':
+                return today - timedelta(days=365)
+            elif period_str == '2y':
+                return today - timedelta(days=730)
+            elif period_str == '5y':
+                return today - timedelta(days=1825)
+            else:
+                return today - timedelta(days=365) # Default to 1 year
+
         if refresh_data or run_analysis or st.button("Load Historical Data", key="load_hist"):
             try:
-                with st.spinner(f'Fetching historical data for {ticker}...'):
-                    df = get_stock_data(ticker, start='2020-01-01')
+                # 💡 FIX: Calculate start_date based on the lookback_period
+                start_date = get_start_date_from_period(lookback_period)
+                start_date_str = start_date.strftime('%Y-%m-%d')
+                
+                with st.spinner(f'Fetching data since {start_date_str} for {ticker}...'):
+                    # Call the function with 'start' instead of 'period'
+                    df = get_stock_data(ticker, start=start_date_str)
                 
                 if df is None or df.empty:
                     st.error(f'Could not find stock data for ticker: **{ticker}**')
                 else:
-                    st.success(f'✅ Successfully fetched {len(df)} days of data')
+                    st.success(f'✅ Successfully fetched {len(df)} rows of data for the selected period')
                     
                     # Store in session state
                     st.session_state.stock_data = df
@@ -231,15 +256,15 @@ else:
                             st.metric("Current Price", f"${current_price:.2f}")
                     
                     with col2:
-                        if 'Close' in df.columns:
+                        if 'Close' in df.columns and len(df) > 1: 
                             day_change = df['Close'].iloc[-1] - df['Close'].iloc[-2]
                             day_change_pct = (day_change / df['Close'].iloc[-2]) * 100
                             st.metric("Day Change", f"${day_change:.2f}", f"{day_change_pct:+.2f}%")
                     
                     with col3:
-                        if 'High' in df.columns and 'Low' in df.columns:
-                            high_52w = df['High'].tail(252).max()
-                            st.metric("52W High", f"${high_52w:.2f}")
+                        if 'High' in df.columns:
+                            period_high = df['High'].max()
+                            st.metric(f"Period High ({lookback_period})", f"${period_high:.2f}")
                     
                     with col4:
                         if 'Volume' in df.columns:
@@ -248,21 +273,22 @@ else:
                     
                     # Data table
                     st.divider()
+                    st.subheader(f"Data Table ({lookback_period})")
                     st.dataframe(
-                        df.tail(100),
+                        df,
                         use_container_width=True,
                         height=400
                     )
                     
                     # Price chart
-                    if 'Close' in df.columns and not df['Close'].isnull().all():
+                    if 'Close' in df.columns and not df.isnull().all()['Close']:
                         st.divider()
-                        st.subheader("Price History")
-                        st.line_chart(df['Close'].tail(252), use_container_width=True)
+                        st.subheader(f"Price History ({lookback_period})")
+                        st.line_chart(df['Close'], use_container_width=True)
                     
             except Exception as e:
                 st.error(f'❌ Error fetching stock data: {e}')
-    
+                st.exception(e)
     # ----------------------------
     # TAB 2: AI Predictions
     # ----------------------------
