@@ -32,3 +32,4 @@ git+https://github.com/JustAnotherArchivist/snscrape.git
 praw
 xgboost
 scikit-learn
+google-generativeai

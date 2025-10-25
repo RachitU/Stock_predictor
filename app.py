@@ -8,6 +8,16 @@ from src.config import db_available, db, OPENAI_API_KEY
 from src.data_collection import get_stock_data, scrape_multiple_news
 from src.nlp_sentiment_predictor import nlp_sentiment_pipeline
 from datetime import datetime
+import google.generativeai as genai
+import os
+
+# Configure Gemini
+genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+if not os.getenv("GEMINI_API_KEY"):
+    st.error("❌ GEMINI_API_KEY environment variable is NOT set.")
+# 💡 FIX: Changed model to the generally available and recommended 'gemini-2.5-flash'
+# This helps prevent the 404 error from a potentially unaliased model name.
+gemini_model = genai.GenerativeModel("gemini-2.5-flash") 
 
 # Page Configuration
 st.set_page_config(
@@ -176,16 +186,21 @@ else:
     st.markdown(f"## Analysis for **{ticker}**")
     
     # Create tabs for different views
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab1, tab2, tab3, tab4,tab5 = st.tabs([
         "📊 Historical Data",
         "🔮 AI Predictions",
         "📰 Data and Tally",
-        "📈 Technical Indicators"
+        "📈 Technical Indicators",
+        "🧩 Summary Insights"
     ])
     
     # ----------------------------
     # TAB 1: Historical Data
     # ----------------------------
+    # ----------------------------
+    # TAB 5: Gemini Summary
+    # ----------------------------
+
     with tab1:
         st.subheader(f"Historical Stock Data - {ticker}")
         
@@ -440,17 +455,94 @@ else:
                     st.metric("50-Day MA", f"${df['MA_50'].iloc[-1]:.2f}")
                 with col3:
                     st.metric("200-Day MA", f"${df['MA_200'].iloc[-1]:.2f}")
-            else:
-                st.warning("Load historical data first to view technical indicators.")
-        else:
-            st.info("Load historical data in the 'Historical Data' tab to view technical indicators.")
+    
+    with tab5:
+        st.subheader(f"🧩 AI-Powered Summary - {ticker}")
 
-# Footer
-st.divider()
-st.markdown("""
-<div style='text-align: center; color: #666; padding: 2rem;'>
-    <p><strong>SynapseStreet</strong> · AI-Powered Stock Intelligence Platform</p>
-    <p style='font-size: 0.9rem;'>Powered by FinBERT · XGBoost · NetworkX · Plotly · Streamlit</p>
-    <p style='font-size: 0.8rem;'>⚠️ Disclaimer: This tool is for educational purposes only. Not financial advice.</p>
-</div>
-""", unsafe_allow_html=True)
+        # Add a button to explicitly generate the summary
+        if st.button("Generate AI Summary", key="gen_summary", type="primary", use_container_width=True):
+            
+            # Check if we have the necessary data from other tabs
+            if 'prediction' not in st.session_state or 'analyzed_df' not in st.session_state or 'stock_data' not in st.session_state:
+                st.warning("⚠️ Please run a 'Full Analysis' on the sidebar first to generate data for the summary.")
+            
+            elif not os.getenv("GEMINI_API_KEY"):
+                st.error("❌ GEMINI_API_KEY is not set. Cannot generate summary.")
+            
+            else:
+                try:
+                    with st.spinner("🧠 Gemini is analyzing the data..."):
+                        
+                        # --- 1. Gather all the data from session state ---
+                        prediction_data = st.session_state.prediction
+                        sentiment_df = st.session_state.analyzed_df
+                        stock_df = st.session_state.stock_data
+
+                        # --- 2. Prepare key data points for the prompt ---
+                        current_price = stock_df['Close'].iloc[-1]
+                        day_change_pct = ((stock_df['Close'].iloc[-1] / stock_df['Close'].iloc[-2]) - 1) * 100
+                        high_52w = stock_df['High'].tail(252).max()
+                        
+                        trend = prediction_data.get('trend', 'N/A')
+                        avg_sentiment = prediction_data.get('avg_sentiment', 0)
+                        target_30d = prediction_data.get('target_30d', 'N/A')
+                        change_30d = prediction_data.get('predicted_change_30d', 'N/A')
+                        confidence = prediction_data.get('confidence', 'N/A')
+
+                        sentiment_counts = sentiment_df['sentiment'].value_counts()
+                        positive_count = int(sentiment_counts.get('positive', 0) + sentiment_counts.get('POSITIVE', 0))
+                        neutral_count = int(sentiment_counts.get('neutral', 0) + sentiment_counts.get('NEUTRAL', 0))
+                        negative_count = int(sentiment_counts.get('negative', 0) + sentiment_counts.get('NEGATIVE', 0))
+                        
+                        # --- 3. Construct the Prompt ---
+                        prompt = f"""
+                        You are an expert financial analyst. Your task is to provide a concise, insightful summary for a retail investor based on the provided data for the stock ticker: {ticker}.
+                        
+                        **Do not just list the data.** You must synthesize it into a coherent narrative. Explain what the data *means* in combination.
+                        
+                        Here is the data:
+
+                        **1. Current Market Data:**
+                        - Current Price: ${current_price:.2f}
+                        - 52-Week High: ${high_52w:.2f}
+                        - Today's Change: {day_change_pct:+.2f}%
+
+                        **2. AI/ML Prediction (XGBoost Model):**
+                        - Predicted Trend: {trend}
+                        - 30-Day Price Target: {target_30d} (Predicted Change: {change_30d})
+                        - Model Confidence: {confidence}
+
+                        **3. News Sentiment Analysis (FinBERT Model):**
+                        - Average Sentiment Score: {avg_sentiment:+.3f} (where > 0 is positive, < 0 is negative)
+                        - News Article Tally: {positive_count} Positive, {neutral_count} Neutral, {negative_count} Negative
+                        
+                        **Your Task:**
+                        Write a 3-paragraph summary covering:
+                        1.  **Current Snapshot:** A brief on the stock's current price and recent performance.
+                        2.  **Sentiment & News:** What is the overall market sentiment (based on the news) and how might this be influencing the stock?
+                        3.  **Forward-Looking Outlook:** What does the AI prediction model suggest for the next 30 days? Combine the trend, target, and sentiment into a final concluding thought.
+                        
+                        Format the output as clean markdown.
+                        """
+
+                        # --- 4. Call Gemini API ---
+                        # The 'gemini_model' variable was already initialized at the top of your script
+                        response = gemini_model.generate_content(prompt)
+                        
+                        # --- 5. Display the output ---
+                        st.markdown(response.text)
+                        
+                        # Cache the summary
+                        st.session_state.gemini_summary = response.text
+
+                except Exception as e:
+                    st.error(f"❌ Error generating Gemini summary: {e}")
+                    st.exception(e)
+        
+        # Display cached summary if it exists
+        elif 'gemini_summary' in st.session_state:
+            st.markdown(st.session_state.gemini_summary)
+            
+        else:
+            # Initial state of the tab before the button is pressed
+            st.info("Click the 'Generate AI Summary' button to get an AI-powered insight combining all analysis.")
