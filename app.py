@@ -179,7 +179,7 @@ else:
     tab1, tab2, tab3, tab4 = st.tabs([
         "📊 Historical Data",
         "🔮 AI Predictions",
-        "📰 Sentiment Analysis",
+        "📰 Data and Tally",
         "📈 Technical Indicators"
     ])
     
