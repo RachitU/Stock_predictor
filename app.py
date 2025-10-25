@@ -520,40 +520,65 @@ else:
     # ----------------------------
     # TAB 5: Gemini Summary
     # ----------------------------
+    # ----------------------------
+    # TAB 5: Gemini Summary
+    # ----------------------------
     with tab5:
         st.subheader(f"🧩 AI-Powered Summary - {ticker}")
 
         if st.button("Generate AI Summary", key="gen_summary", type="primary", use_container_width=True):
             
-            if 'prediction' not in st.session_state or 'analyzed_df' not in st.session_state or 'stock_data' not in st.session_state:
-                st.warning("⚠️ Please run a 'Full Analysis' on the sidebar first to generate data for the summary.")
-            
+            # --- Check if necessary data exists ---
+            # Check stock_data first, as it's fundamental
+            if 'stock_data' not in st.session_state or st.session_state.stock_data.empty:
+                 st.warning("⚠️ Please load historical data in Tab 1 first.")
+            # Check prediction data next
+            elif 'prediction' not in st.session_state:
+                st.warning("⚠️ Please run 'Generate Predictions' in Tab 2 first.")
+            # Check analyzed_df exists (even if empty)
+            elif 'analyzed_df' not in st.session_state:
+                 st.warning("⚠️ Sentiment data not found. Please run 'Generate Predictions' in Tab 2.")
+            # Check API Key
             elif not os.getenv("GEMINI_API_KEY"):
                 st.error("❌ GEMINI_API_KEY is not set. Cannot generate summary.")
             
+            # --- If all checks pass, proceed ---
             else:
                 try:
                     with st.spinner("🧠 Gemini is analyzing the data..."):
                         
                         prediction_data = st.session_state.prediction
-                        sentiment_df = st.session_state.analyzed_df
+                        sentiment_df = st.session_state.analyzed_df # Could be empty
                         stock_df = st.session_state.stock_data
 
+                        # Prepare market data
                         current_price = stock_df['Close'].iloc[-1]
                         day_change_pct = ((stock_df['Close'].iloc[-1] / stock_df['Close'].iloc[-2]) - 1) * 100
                         period_high = stock_df['High'].max()
                         
+                        # Prepare prediction data
                         trend = prediction_data.get('trend', 'N/A')
-                        avg_sentiment = prediction_data.get('avg_sentiment', 0)
+                        avg_sentiment = prediction_data.get('avg_sentiment', 0.0) # Use the avg_sentiment from prediction dict
                         target_30d = prediction_data.get('target_30d', 'N/A')
                         change_30d = prediction_data.get('predicted_change_30d', 'N/A')
                         confidence = prediction_data.get('confidence', 'N/A')
 
-                        sentiment_counts = sentiment_df['sentiment'].value_counts()
-                        positive_count = int(sentiment_counts.get('positive', 0) + sentiment_counts.get('POSITIVE', 0))
-                        neutral_count = int(sentiment_counts.get('neutral', 0) + sentiment_counts.get('NEUTRAL', 0))
-                        negative_count = int(sentiment_counts.get('negative', 0) + sentiment_counts.get('NEGATIVE', 0))
+                        # --- 💡 FIX: Safely calculate sentiment counts ---
+                        positive_count = 0
+                        neutral_count = 0
+                        negative_count = 0
                         
+                        # Only calculate counts if the DataFrame is not empty AND has the column
+                        if not sentiment_df.empty and 'sentiment' in sentiment_df.columns:
+                            sentiment_counts = sentiment_df['sentiment'].value_counts()
+                            positive_count = int(sentiment_counts.get('positive', 0) + sentiment_counts.get('POSITIVE', 0))
+                            neutral_count = int(sentiment_counts.get('neutral', 0) + sentiment_counts.get('NEUTRAL', 0))
+                            negative_count = int(sentiment_counts.get('negative', 0) + sentiment_counts.get('NEGATIVE', 0))
+                        else:
+                            st.info("ℹ️ No recent news articles found to include sentiment tally in the summary.")
+                        # --- 💡 END OF FIX ---
+
+                        # Construct the Prompt
                         prompt = f"""
                         You are an expert financial analyst. Your task is to provide a concise, insightful summary for a retail investor based on the provided data for the stock ticker: {ticker}.
                         
@@ -578,7 +603,7 @@ else:
                         **Your Task:**
                         Write a 3-paragraph summary covering:
                         1.  **Current Snapshot:** A brief on the stock's current price (in its correct currency) and recent performance.
-                        2.  **Sentiment & News:** What is the overall market sentiment (based on the news) and how might this be influencing the stock?
+                        2.  **Sentiment & News:** What is the overall market sentiment (based on the *average score*) and how might this be influencing the stock? Briefly mention the news tally if available (e.g., "Sentiment is positive, reflected in X positive news articles..."). If counts are zero, state that no recent news was factored into the tally.
                         3.  **Forward-Looking Outlook:** What does the AI prediction model suggest for the next 30 days? Combine the trend, target, and sentiment into a final concluding thought.
                         
                         Format the output as clean markdown.
@@ -592,11 +617,13 @@ else:
                     st.error(f"❌ Error generating Gemini summary: {e}")
                     st.exception(e)
         
+        # Display cached summary if it exists
         elif 'gemini_summary' in st.session_state:
             st.markdown(st.session_state.gemini_summary)
+            
         else:
+            # Initial state of the tab before the button is pressed
             st.info("Click the 'Generate AI Summary' button to get an AI-powered insight combining all analysis.")
-
     # ----------------------------
     # 💡 NEW TAB 6: Company Profile
     # ----------------------------
