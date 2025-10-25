@@ -1,8 +1,8 @@
-
 """
 Enhanced NLP Sentiment Predictor with ML-based Stock Movement Forecasting
 Includes time-series prediction, sentiment integration, and visualization
 """
+
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -18,9 +18,7 @@ import yfinance as yf
 import warnings
 warnings.filterwarnings('ignore')
 
-# ----------------------------
-# Sentiment Analyzer
-# ----------------------------
+# Initialize sentiment model (HuggingFace FinBERT or fallback to generic)
 try:
     sentiment_analyzer = pipeline("sentiment-analysis", model="ProsusAI/finbert")
     print("✅ FinBERT model loaded successfully")
@@ -28,14 +26,13 @@ except Exception as e:
     print(f"⚠️ Could not load FinBERT, using default model: {e}")
     sentiment_analyzer = pipeline("sentiment-analysis")
 
-# OpenAI API (optional)
+# Set up OpenAI (optional for prediction)
 if OPENAI_API_KEY:
     openai.api_key = OPENAI_API_KEY
 
-# ----------------------------
-# Fetch recent news from DB (includes Reddit)
-# ----------------------------
+
 def fetch_recent_news(ticker: str, days: int = 5):
+    """Fetch recent news articles for a given stock from MongoDB."""
     if not db_available:
         print("Database not available.")
         return pd.DataFrame()
@@ -44,16 +41,15 @@ def fetch_recent_news(ticker: str, days: int = 5):
     since = datetime.utcnow() - timedelta(days=days)
     cursor = collection.find(
         {"ticker": ticker, "timestamp": {"$gte": since}},
-        {"_id": 0, "title": 1, "snippet": 1, "source":1, "timestamp":1}
+        {"_id": 0, "title": 1, "snippet": 1, "source": 1, "timestamp": 1}
     )
 
     df = pd.DataFrame(list(cursor))
     return df
 
-# ----------------------------
-# Sentiment Analysis
-# ----------------------------
+
 def analyze_sentiment(news_df: pd.DataFrame):
+    """Run sentiment analysis on news headlines/snippets."""
     if news_df.empty:
         return pd.DataFrame(), 0.0
 
@@ -65,13 +61,10 @@ def analyze_sentiment(news_df: pd.DataFrame):
 
     # Normalize sentiment: positive = +1, neutral = 0, negative = -1
     mapping = {'positive': 1, 'neutral': 0, 'negative': -1, 'POSITIVE': 1, 'NEGATIVE': -1, 'NEUTRAL': 0}
-    mapping = {'positive':1, 'neutral':0, 'negative':-1}
-
     news_df['sentiment_value'] = news_df['sentiment'].map(mapping).fillna(0)
     avg_sentiment = np.mean(news_df['sentiment_value'])
     
     return news_df, avg_sentiment
-
 
 
 def get_historical_data(ticker: str, period: str = "6mo"):
@@ -384,14 +377,6 @@ def predict_stock_trend(ticker: str, avg_sentiment: float, predictions: list):
     elif change_30d < 0:
         trend = "📉 Moderately Bearish"
         confidence = "Medium"
-# ----------------------------
-# Simple Rule-based Stock Prediction
-# ----------------------------
-def predict_stock_trend(ticker: str, avg_sentiment: float):
-    if avg_sentiment > 0.2:
-        trend = "📈 Likely Bullish"
-    elif avg_sentiment < -0.2:
-        trend = "📉 Likely Bearish"
     else:
         trend = "➖ Neutral / Sideways"
         confidence = "Low"
@@ -489,14 +474,6 @@ def nlp_sentiment_pipeline(ticker: str, forecast_days: int = 30):
     print(f"{'='*60}\n")
     
     return analyzed_df, prediction, fig
-# ----------------------------
-# Full NLP Pipeline
-# ----------------------------
-def nlp_sentiment_pipeline(ticker: str):
-    df = fetch_recent_news(ticker)
-    if df.empty:
-        return None, "No recent news or Reddit posts found."
-
 
 
 # Example usage

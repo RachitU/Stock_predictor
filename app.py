@@ -100,28 +100,6 @@ st.markdown('<p class="sub-header">AI-Powered Stock Analysis combining News Sent
 # ============================================================================
 
 POPULAR_TICKERS = [
-    # US Stocks - Tech
-    'AAPL', 'MSFT', 'GOOGL', 'GOOG', 'AMZN', 'NVDA', 'META', 'NFLX', 'ADBE', 'CRM', 
-    'TSLA', 'AMD', 'INTC', 'CSCO', 'QCOM',
-    # US - Finance & Banking
-    'JPM', 'BAC', 'WFC', 'GS', 'MS', 'V', 'MA', 'AXP',
-    # US - Healthcare
-    'JNJ', 'PFE', 'LLY', 'UNH', 'MRK', 'ABBV', 'TMO',
-    # US - Consumer & Retail
-    'PG', 'KO', 'PEP', 'WMT', 'COST', 'HD', 'LOW', 'NKE', 'MCD',
-    # US - Industrial & Energy
-    'BA', 'CAT', 'GE', 'LMT', 'XOM', 'CVX', 'DUK', 'NEE',
-    # Indian Stocks - IT
-    'TCS.NS', 'INFY.NS', 'WIPRO.NS', 'HCLTECH.NS', 'TECHM.NS',
-    # Indian - Banking
-    'HDFCBANK.NS', 'ICICIBANK.NS', 'SBIN.NS', 'AXISBANK.NS', 'KOTAKBANK.NS', 'BAJFINANCE.NS',
-    # Indian - Manufacturing & Infrastructure
-    'RELIANCE.NS', 'LT.NS', 'MARUTI.NS', 'TATAMOTORS.NS', 'M&M.NS', 'ULTRACEMCO.NS',
-    # Indian - Pharma
-    'SUNPHARMA.NS', 'DRREDDY.NS', 'APOLLOHOSP.NS',
-    # Indian - FMCG & Others
-# --- Full Predefined Tickers (US + Indian) ---
-POPULAR_TICKERS = [
     # US Stocks (FAANGM, Tech, Internet)
     'AAPL', 'MSFT', 'GOOGL', 'GOOG', 'AMZN', 'NVDA', 'META', 'NFLX', 'ADBE', 'CRM', 
     'TSLA', 'AMD', 'INTC', 'CSCO', 'QCOM',
@@ -145,7 +123,6 @@ POPULAR_TICKERS = [
     # Pharma & Healthcare
     'SUNPHARMA.NS', 'DRREDDY.NS', 'APOLLOHOSP.NS',
     # FMCG & Others
->>>>>>> 6cdf3a80c99f767c3213d33228a58c56aa9b1129
     'HUL.NS', 'ITC.NS', 'NESTLEIND.NS', 'ASIANPAINT.NS', 'BHARTIARTL.NS', 'TITAN.NS', 'ADANIENT.NS'
 ]
 
@@ -986,6 +963,8 @@ else:
 # ----------------------------
 st.header('🧠 News Sentiment & Prediction')
 
+run_scrape = st.button('🚀 Run News Sentiment Analysis', key='run_sentiment')
+
 if run_scrape:
     if not ticker:
         st.warning("Please select a stock first.")
@@ -1034,4 +1013,3 @@ if run_scrape:
 
             except Exception as e:
                 st.error(f"Error in sentiment pipeline: {e}")
-
