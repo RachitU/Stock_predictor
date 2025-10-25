@@ -12,7 +12,7 @@ import google.generativeai as genai
 import os
 import plotly.graph_objects as go
 import yfinance as yf # Import yfinance for Company Profile
-
+import pytz
 # Configure Gemini
 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 if not os.getenv("GEMINI_API_KEY"):
@@ -382,36 +382,70 @@ else:
     # ----------------------------
     # TAB 3: Sentiment Analysis
     # ----------------------------
+    # ----------------------------
+    # TAB 3: Sentiment Analysis
+    # ----------------------------
     with tab3:
         st.subheader(f"📰 News Sentiment Analysis - {ticker}")
-        
+
         if run_analysis or st.button("Fetch Latest News", key="fetch_news"):
             try:
                 with st.spinner(f'Fetching and analyzing news for {ticker}...'):
-                    news_df = scrape_multiple_news(ticker, limit=10)
-                    
-                    if news_df.empty:
+                    # Fetch fresh news (assuming scrape_multiple_news is the primary way now)
+                    # If using nlp_sentiment_pipeline's output, ensure it fetches news first
+                    news_df_raw = scrape_multiple_news(ticker, limit=10) # Get raw news
+
+                    if news_df_raw.empty:
                         st.warning("No recent news found for this ticker.")
+                        # Clear potential old sentiment data if no news found
+                        if 'analyzed_df' in st.session_state:
+                             del st.session_state['analyzed_df']
                     else:
-                        st.success(f"✅ Found {len(news_df)} news articles")
-                        
+                        st.success(f"✅ Found {len(news_df_raw)} news articles")
+
+                        # Perform sentiment analysis if needed (or retrieve from session state if run_analysis was pressed)
+                        if 'analyzed_df' in st.session_state and not st.session_state.analyzed_df.empty:
+                             analyzed_df = st.session_state.analyzed_df
+                        else:
+                             # If only 'Fetch News' was pressed, analyze sentiment here
+                             from src.nlp_sentiment_predictor import analyze_sentiment # Import if not already imported
+                             analyzed_df, _ = analyze_sentiment(news_df_raw)
+                             st.session_state.analyzed_df = analyzed_df # Store it
+
+                        # Store raw news to database if available
                         if db_available:
+                            # ... (database insertion code remains the same) ...
                             collection = db.get_collection("news_articles")
-                            data_to_insert = news_df.to_dict(orient="records")
+                            data_to_insert = news_df_raw.to_dict(orient="records")
                             for item in data_to_insert:
                                 item["ticker"] = ticker
-                                item["timestamp"] = datetime.utcnow()
-                            collection.insert_many(data_to_insert)
-                            st.info("📦 News articles saved to database")
-                        
-                        if 'analyzed_df' in st.session_state and not st.session_state.analyzed_df.empty:
-                            analyzed_df = st.session_state.analyzed_df
-                            
+                                # Ensure timestamp is compatible if not already datetime
+                                if 'timestamp' in item and not isinstance(item['timestamp'], datetime):
+                                    item['timestamp'] = pd.to_datetime(item['timestamp']).to_pydatetime()
+                                elif 'timestamp' not in item:
+                                     item['timestamp'] = datetime.utcnow() # Fallback
+
+                            # Handle potential timezone issues before inserting
+                            for item in data_to_insert:
+                                if isinstance(item.get('timestamp'), datetime) and item['timestamp'].tzinfo:
+                                    item['timestamp'] = item['timestamp'].astimezone(pytz.utc).replace(tzinfo=None) # Example using pytz
+
+                            try:
+                                collection.insert_many(data_to_insert)
+                                st.info("📦 News articles saved to database")
+                            except Exception as db_err:
+                                st.warning(f"⚠️ Could not save news to DB: {db_err}")
+
+
+                        # Display analyzed sentiment
+                        if not analyzed_df.empty:
+                            # Sentiment distribution
                             st.divider()
                             st.subheader("Sentiment Distribution")
+
                             sentiment_counts = analyzed_df['sentiment'].value_counts()
                             col1, col2, col3 = st.columns(3)
-                            
+
                             with col1:
                                 positive = sentiment_counts.get('positive', 0) + sentiment_counts.get('POSITIVE', 0)
                                 st.metric("🟢 Positive", positive)
@@ -421,38 +455,93 @@ else:
                             with col3:
                                 negative = sentiment_counts.get('negative', 0) + sentiment_counts.get('NEGATIVE', 0)
                                 st.metric("🔴 Negative", negative)
-                            
+
+                            # Detailed breakdown
                             st.divider()
                             st.subheader("Detailed Sentiment Breakdown")
-                            display_df = analyzed_df[['title', 'sentiment', 'score', 'sentiment_value', 'source']].copy()
-                            
+
+                            # --- 💡 MODIFIED SECTION 💡 ---
+                            # Select columns including timestamp
+                            if 'timestamp' in analyzed_df.columns:
+                                display_cols = ['timestamp', 'title', 'sentiment', 'score', 'sentiment_value', 'source']
+                            else:
+                                # Fallback if timestamp wasn't correctly added/passed
+                                st.warning("Timestamp column not found in analyzed news data.")
+                                display_cols = ['title', 'sentiment', 'score', 'sentiment_value', 'source']
+
+                            display_df = analyzed_df[display_cols].copy()
+
+                            # Format timestamp if it exists
+                            if 'timestamp' in display_df.columns:
+                                # Ensure it's datetime
+                                display_df['timestamp'] = pd.to_datetime(display_df['timestamp'])
+                                # Format nicely
+                                display_df['timestamp'] = display_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M')
+                                # Rename for clarity
+                                display_df.rename(columns={'timestamp': 'Date/Time'}, inplace=True)
+
+
+                            # Color code sentiment (remains the same)
                             def highlight_sentiment(row):
-                                if row['sentiment_value'] > 0:
+                                # Check if 'sentiment_value' exists before using it
+                                sentiment_val = row.get('sentiment_value', 0)
+                                if sentiment_val > 0:
                                     return ['background-color: #008B8B'] * len(row)
-                                elif row['sentiment_value'] < 0:
+                                elif sentiment_val < 0:
                                     return ['background-color: #E44D2E'] * len(row)
                                 else:
-                                    return ['background-color: #000000'] * len(row)
-                            
+                                    return ['background-color: #080808'] * len(row) # Use tab background color
+
                             st.dataframe(
                                 display_df.style.apply(highlight_sentiment, axis=1),
                                 use_container_width=True,
-                                height=400
+                                height=400,
+                                hide_index=True # Clean up the view
                             )
+                            # --- 💡 END OF MODIFIED SECTION 💡 ---
+
                         else:
-                            st.info("Run 'Generate Predictions' in the AI Predictions tab to see sentiment analysis.")
-                            
+                            st.info("Run 'Generate Predictions' in the AI Predictions tab or 'Fetch Latest News' to see sentiment analysis.")
+
             except Exception as e:
-                st.error(f"❌ Error analyzing sentiment: {e}")
-        
+                st.error(f"❌ Error fetching/analyzing sentiment: {e}")
+                st.exception(e) # Show full traceback for debugging
+
+        # Display cached sentiment if available
         elif 'analyzed_df' in st.session_state and not st.session_state.analyzed_df.empty:
-            st.info("Showing cached sentiment analysis. Click 'Fetch Latest News' to update.")
+            st.info("Showing cached sentiment analysis. Click 'Fetch Latest News' or 'Run Full Analysis' to update.")
             analyzed_df = st.session_state.analyzed_df
+
+            # --- 💡 DUPLICATED DISPLAY LOGIC FOR CACHED DATA 💡 ---
+            # Select columns including timestamp
+            if 'timestamp' in analyzed_df.columns:
+                display_cols = ['timestamp', 'title', 'sentiment', 'score', 'sentiment_value', 'source']
+            else:
+                 display_cols = ['title', 'sentiment', 'score', 'sentiment_value', 'source']
+
+            display_df = analyzed_df[display_cols].copy()
+
+            # Format timestamp if it exists
+            if 'timestamp' in display_df.columns:
+                display_df['timestamp'] = pd.to_datetime(display_df['timestamp'])
+                display_df['timestamp'] = display_df['timestamp'].dt.strftime('%Y-%m-%d %H:%M')
+                display_df.rename(columns={'timestamp': 'Date/Time'}, inplace=True)
+
+            def highlight_sentiment(row):
+                 sentiment_val = row.get('sentiment_value', 0)
+                 if sentiment_val > 0: return ['background-color: #008B8B'] * len(row)
+                 elif sentiment_val < 0: return ['background-color: #E44D2E'] * len(row)
+                 else: return ['background-color: #080808'] * len(row)
+
             st.dataframe(
-                analyzed_df[['title', 'sentiment', 'score', 'sentiment_value']],
-                use_container_width=True
+                display_df.style.apply(highlight_sentiment, axis=1),
+                use_container_width=True,
+                hide_index=True
             )
-    
+            # --- 💡 END OF DUPLICATED LOGIC 💡 ---
+
+        else:
+             st.info("Click 'Fetch Latest News' or 'Run Full Analysis' to see news sentiment.")
     # ----------------------------
     # TAB 4: Technical Indicators
     # ----------------------------

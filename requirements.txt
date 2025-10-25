@@ -34,3 +34,4 @@ xgboost
 scikit-learn
 google-generativeai
 ta
+pytz
