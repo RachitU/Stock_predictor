@@ -29,7 +29,7 @@ if run_scrape:
     except Exception as e:
         st.error('Twitter scrape failed: ' + str(e))
     try:
-        news_text = scrape_news('https://www.reuters.com/technology/')
+        news_text = scrape_news('https://m.economictimes.com/markets')
         st.write('Scraped news snippet:', news_text[:400])
     except Exception as e:
         st.error('News scrape failed: ' + str(e))
@@ -49,5 +49,4 @@ if st.button('Generate Insight'):
     result = summarize_insight(user_text)
     st.write(result)
 
-st.write('---')
-st.write('This is a minimal working package. Check README for setup steps.')
+
