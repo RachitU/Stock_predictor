@@ -3,7 +3,7 @@ streamlit
 pandas
 numpy
 requests
-
+feedparser
 # Database
 pymongo
 python-dotenv
@@ -28,3 +28,5 @@ python-dateutil
 
 # For web scraping (if you scrape news sites directly)
 tqdm
+git+https://github.com/JustAnotherArchivist/snscrape.git
+praw
