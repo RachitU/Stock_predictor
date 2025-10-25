@@ -71,8 +71,39 @@ def get_historical_data(ticker: str, period: str = "6mo"):
     """Fetch historical stock data using yfinance."""
     try:
         stock = yf.Ticker(ticker)
+        # 💡 FIX: Use period argument, but yfinance.history uses 'start'
+        # This will be handled by the logic in app.py sending a 'start' date
+        # This function *also* needs to accept a 'start' argument
+        # We will modify the function in app.py to send 'start' instead of 'period'
+        # Oh, wait, the user's app.py code *already* calculates start_date
+        # but the function it imports `get_stock_data` is from data_collection, not here.
+        # This `get_historical_data` function IS used by the pipeline.
+        # The user's code from previous turn (`app.py`) calls `get_stock_data` from `src.data_collection`
+        # BUT the `nlp_sentiment_pipeline` calls *this* function `get_historical_data`.
+        # I need to make sure this function accepts the `period` argument.
+        
+        # The user's `nlp_sentiment_pipeline` *was* hardcoded to 6mo.
+        # My previous fix had it accept `lookback_period` and pass it to this function as `period`.
+        
         df = stock.history(period=period, auto_adjust=True)
+        if df.empty:
+             # Fallback for period if it fails (e.g., '1mo' might be too short for some tickers)
+             print(f"Warning: yfinance returned empty data for period={period}. Trying start date.")
+             from datetime import datetime, timedelta
+             if period == '1mo': start = datetime.now() - timedelta(days=30)
+             elif period == '3mo': start = datetime.now() - timedelta(days=90)
+             elif period == '6mo': start = datetime.now() - timedelta(days=182)
+             elif period == '1y': start = datetime.now() - timedelta(days=365)
+             elif period == '2y': start = datetime.now() - timedelta(days=730)
+             elif period == '5y': start = datetime.now() - timedelta(days=1825)
+             else: start = datetime.now() - timedelta(days=365)
+             df = stock.history(start=start.strftime('%Y-%m-%d'), auto_adjust=True)
+
         df.reset_index(inplace=True)
+        # Ensure 'Date' column is timezone-naive for comparisons
+        if 'Date' in df.columns:
+            df['Date'] = df['Date'].dt.tz_localize(None)
+            
         return df
     except Exception as e:
         print(f"❌ Error fetching stock data: {e}")
@@ -115,7 +146,7 @@ def prepare_features(stock_df: pd.DataFrame, sentiment_value: float = 0.0):
     df['Volume_MA'] = df['Volume'].rolling(window=20).mean()
     df['Volume_ratio'] = df['Volume'] / df['Volume_MA']
     
-    # Add sentiment as a feature
+    # Add sentiment as a feature (even if not used in model, good for records)
     df['sentiment'] = sentiment_value
     
     # Lag features (previous days' prices)
@@ -129,21 +160,32 @@ def train_prediction_model(stock_df: pd.DataFrame, sentiment_value: float = 0.0)
     """Train ML model to predict future prices."""
     df = prepare_features(stock_df, sentiment_value)
     
-    # Drop NaN values from feature engineering
-    df = df.dropna()
-    
-    if len(df) < 30:
-        print("⚠️ Insufficient data for training")
-        return None, None, df
-    
     # Features for prediction
+    # 💡 FIX: Removed 'Volume_ratio' and 'sentiment' to prevent flatline
     feature_cols = ['MA_5', 'MA_10', 'MA_20', 'RSI', 'MACD', 'MACD_signal', 
-                    'volatility', 'Volume_ratio', 'sentiment',
+                    'volatility',
                     'Close_lag_1', 'Close_lag_2', 'Close_lag_3', 'Close_lag_5', 'Close_lag_10']
     
+    target_col = 'Close'
+    
+    # 💡 FIX: Create a new DataFrame with *only* the columns we need
+    # *before* dropping NaN values. This is more robust.
+    model_data_cols = feature_cols + [target_col]
+    
+    # Ensure all columns exist before trying to dropna
+    valid_cols = [col for col in model_data_cols if col in df.columns]
+    model_data = df[valid_cols].copy()
+    
+    # Drop NaN values from *only this new DataFrame*
+    model_data = model_data.dropna()
+    
+    if len(model_data) < 30:
+        print(f"⚠️ Insufficient data for training. Need 30 rows, got {len(model_data)}. Try a longer lookback period.")
+        return None, None, df # Return the *original* df for the predict function
+    
     # Prepare X and y
-    X = df[feature_cols].values
-    y = df['Close'].values
+    X = model_data[feature_cols].values
+    y = model_data[target_col].values
     
     # Split: use last 20% for validation
     split_idx = int(len(X) * 0.8)
@@ -165,42 +207,57 @@ def train_prediction_model(stock_df: pd.DataFrame, sentiment_value: float = 0.0)
     score = model.score(X_val, y_val)
     print(f"✅ Model trained - R² Score: {score:.4f}")
     
+    # Return the *original* prepared_df, not the trimmed 'model_data'
     return model, feature_cols, df
 
 
 def predict_future_prices(model, last_data: pd.DataFrame, feature_cols: list, 
                           sentiment_value: float, days_ahead: int = 30):
-    """Predict future stock prices for the next N days."""
-    predictions = []
-    current_features = last_data[feature_cols].iloc[-1].values.reshape(1, -1)
-    last_close = last_data['Close'].iloc[-1]
+    """
+    Predict future stock prices for the next N days by re-calculating
+    all features for each new predicted day.
+    """
     
+    # We need the original data to append our predictions to
+    temp_df = last_data.copy()
+    
+    # Get the last date for generating future dates
+    last_date = temp_df['Date'].iloc[-1]
+    
+    predictions = []
+
     for day in range(days_ahead):
-        # Predict next day
+        # 1. Prepare features for the *current* temp_df
+        # We run prepare_features each time to get the *last valid row* of features
+        df_with_features = prepare_features(temp_df, sentiment_value)
+        
+        # Get the latest features (the last row)
+        current_features = df_with_features[feature_cols].iloc[-1].values.reshape(1, -1)
+        
+        # 2. Make a prediction
         pred_price = model.predict(current_features)[0]
+        
+        # Ensure prediction isn't negative (prices can't be negative)
+        pred_price = max(float(pred_price), 0.0) 
         predictions.append(pred_price)
         
-        # Update features for next prediction (simple approach)
-        # In production, you'd update all features properly
-        new_features = current_features[0].copy()
+        # 3. Create a new row for the *next* day with the predicted price
+        new_date = last_date + timedelta(days=day + 1)
         
-        # Shift lag features
-        new_features[-1] = new_features[-2]  # Close_lag_10 = Close_lag_5
-        new_features[-2] = new_features[-3]  # Close_lag_5 = Close_lag_3
-        new_features[-3] = new_features[-4]  # Close_lag_3 = Close_lag_2
-        new_features[-4] = new_features[-5]  # Close_lag_2 = Close_lag_1
-        new_features[-5] = pred_price         # Close_lag_1 = predicted price
+        avg_volume = temp_df['Volume'].iloc[-20:].mean() 
         
-        # Update moving averages (simplified)
-        new_features[0] = (new_features[0] * 4 + pred_price) / 5  # MA_5
-        new_features[1] = (new_features[1] * 9 + pred_price) / 10  # MA_10
-        new_features[2] = (new_features[2] * 19 + pred_price) / 20  # MA_20
+        new_row = {
+            'Date': new_date,
+            'Open': pred_price,
+            'High': pred_price,
+            'Low': pred_price,
+            'Close': pred_price,
+            'Volume': avg_volume
+        }
         
-        # Keep sentiment constant
-        new_features[8] = sentiment_value
-        
-        current_features = new_features.reshape(1, -1)
-    
+        # 4. Append this new_row to our temp_df
+        temp_df = pd.concat([temp_df, pd.DataFrame([new_row])], ignore_index=True)
+
     return predictions
 
 
@@ -208,6 +265,10 @@ def create_prediction_visualization(ticker: str, historical_df: pd.DataFrame,
                                     predictions: list, sentiment_value: float):
     """Create interactive Plotly visualization of predictions."""
     
+    # 💡 FIX: Determine currency symbol
+    currency_symbol = "₹" if ticker.endswith(".NS") else "$"
+    price_axis_title = f"Price ({currency_symbol})"
+
     # Prepare data
     hist_dates = historical_df['Date'].tolist()
     hist_prices = historical_df['Close'].tolist()
@@ -240,14 +301,20 @@ def create_prediction_visualization(ticker: str, historical_df: pd.DataFrame,
         row=1, col=1
     )
     
+    # 💡 FIX: Connect the prediction line to the historical line
+    last_known_date = historical_df['Date'].iloc[-1]
+    last_known_price = historical_df['Close'].iloc[-1]
+    
+    plot_future_dates = [last_known_date] + future_dates.tolist()
+    plot_predictions = [last_known_price] + predictions
+    
     fig.add_trace(
         go.Scatter(
-            x=future_dates,
-            y=predictions,
-            mode='lines+markers',
+            x=plot_future_dates,
+            y=plot_predictions,
+            mode='lines',
             name='Predicted Price',
-            line=dict(color='#6dd5ed', width=2, dash='dash'),
-            marker=dict(size=6)
+            line=dict(color='#FFA500', width=3) # Orange color
         ),
         row=1, col=1
     )
@@ -330,8 +397,9 @@ def create_prediction_visualization(ticker: str, historical_df: pd.DataFrame,
     
     # Update axes
     fig.update_xaxes(title_text="Date", row=3, col=1)
-    fig.update_yaxes(title_text="Price ($)", row=1, col=1)
-    fig.update_yaxes(title_text="Price ($)", row=2, col=1)
+    # 💡 FIX: Use currency-aware axis titles
+    fig.update_yaxes(title_text=price_axis_title, row=1, col=1)
+    fig.update_yaxes(title_text=price_axis_title, row=2, col=1)
     fig.update_yaxes(title_text="Sentiment", row=3, col=1)
     
     return fig
@@ -339,6 +407,9 @@ def create_prediction_visualization(ticker: str, historical_df: pd.DataFrame,
 
 def predict_stock_trend(ticker: str, avg_sentiment: float, predictions: list):
     """Enhanced prediction with ML-based forecasting."""
+    
+    # 💡 FIX: Determine currency symbol
+    currency_symbol = "₹" if ticker.endswith(".NS") else "$"
     
     if not predictions:
         # Fallback to simple rule-based
@@ -388,20 +459,22 @@ def predict_stock_trend(ticker: str, avg_sentiment: float, predictions: list):
         "confidence": confidence,
         "predicted_change_7d": f"{change_7d:+.2f}%",
         "predicted_change_30d": f"{change_30d:+.2f}%",
-        "current_price": f"${current_price:.2f}",
-        "target_7d": f"${future_price_7d:.2f}",
-        "target_30d": f"${future_price_30d:.2f}",
+        # 💡 FIX: Use currency_symbol
+        "current_price": f"{currency_symbol}{current_price:.2f}",
+        "target_7d": f"{currency_symbol}{future_price_7d:.2f}",
+        "target_30d": f"{currency_symbol}{future_price_30d:.2f}",
         "timestamp": datetime.utcnow()
     }
 
 
-def nlp_sentiment_pipeline(ticker: str, forecast_days: int = 30):
+def nlp_sentiment_pipeline(ticker: str, forecast_days: int = 30, lookback_period: str = "6mo"):
     """
     Full pipeline: Fetch News → Sentiment Analysis → ML Prediction → Visualization
     
     Args:
         ticker: Stock ticker symbol
         forecast_days: Number of days to forecast ahead
+        lookback_period: Amount of historical data to use for training (e.g., "6mo", "1y")
     
     Returns:
         analyzed_df: DataFrame with sentiment analysis
@@ -427,8 +500,8 @@ def nlp_sentiment_pipeline(ticker: str, forecast_days: int = 30):
         print(f"✅ Average Sentiment: {avg_sentiment:.3f}")
     
     # Step 2: Get historical stock data
-    print(f"\n📊 Fetching historical data for {ticker}...")
-    stock_df = get_historical_data(ticker, period="6mo")
+    print(f"\n📊 Fetching {lookback_period} of historical data for {ticker}...")
+    stock_df = get_historical_data(ticker, period=lookback_period)
     
     if stock_df.empty:
         print("❌ Could not fetch stock data")
@@ -458,9 +531,11 @@ def nlp_sentiment_pipeline(ticker: str, forecast_days: int = 30):
     
     # Step 5: Create visualization
     print("\n📈 Creating visualization...")
+    # 💡 FIX: Pass ticker to visualization function
     fig = create_prediction_visualization(ticker, stock_df, predictions, avg_sentiment)
     
     # Step 6: Generate prediction summary
+    # 💡 FIX: Pass ticker to trend function
     prediction = predict_stock_trend(ticker, avg_sentiment, predictions)
     
     print(f"\n{'='*60}")
@@ -478,11 +553,12 @@ def nlp_sentiment_pipeline(ticker: str, forecast_days: int = 30):
 
 # Example usage
 if __name__ == "__main__":
-    ticker = "AAPL"
-    analyzed_df, prediction, fig = nlp_sentiment_pipeline(ticker, forecast_days=30)
+    ticker = "RELIANCE.NS" # Example with Indian stock
+    analyzed_df, prediction, fig = nlp_sentiment_pipeline(ticker, forecast_days=30, lookback_period="1y")
     
     if fig:
         fig.show()
         # Or save to HTML
+        os.makedirs("predictions", exist_ok=True)
         fig.write_html(f"predictions/{ticker}_forecast.html")
         print(f"✅ Visualization saved to predictions/{ticker}_forecast.html")

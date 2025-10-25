@@ -185,6 +185,9 @@ else:
     # Main Analysis Interface
     st.markdown(f"## Analysis for **{ticker}**")
     
+    # 💡 FIX: Determine currency symbol
+    currency_symbol = "₹" if ticker.endswith(".NS") else "$"
+    
     # Create tabs for different views
     tab1, tab2, tab3, tab4,tab5 = st.tabs([
         "📊 Historical Data",
@@ -197,14 +200,10 @@ else:
     # ----------------------------
     # TAB 1: Historical Data
     # ----------------------------
-    # ----------------------------
-    # TAB 5: Gemini Summary
-    # ----------------------------
-
     with tab1:
         st.subheader(f"Historical Stock Data - {ticker}")
         
-        # 💡 FIX: Helper function to convert 'lookback_period' string to a start date
+        # Helper function to convert 'lookback_period' string to a start date
         def get_start_date_from_period(period_str):
             from datetime import datetime, timedelta
             today = datetime.now()
@@ -226,7 +225,7 @@ else:
 
         if refresh_data or run_analysis or st.button("Load Historical Data", key="load_hist"):
             try:
-                # 💡 FIX: Calculate start_date based on the lookback_period
+                # Calculate start_date based on the lookback_period
                 start_date = get_start_date_from_period(lookback_period)
                 start_date_str = start_date.strftime('%Y-%m-%d')
                 
@@ -253,18 +252,21 @@ else:
                     with col1:
                         if 'Close' in df.columns:
                             current_price = df['Close'].iloc[-1]
-                            st.metric("Current Price", f"${current_price:.2f}")
+                            # 💡 FIX: Use currency_symbol
+                            st.metric("Current Price", f"{currency_symbol}{current_price:.2f}")
                     
                     with col2:
                         if 'Close' in df.columns and len(df) > 1: 
                             day_change = df['Close'].iloc[-1] - df['Close'].iloc[-2]
                             day_change_pct = (day_change / df['Close'].iloc[-2]) * 100
-                            st.metric("Day Change", f"${day_change:.2f}", f"{day_change_pct:+.2f}%")
+                            # 💡 FIX: Use currency_symbol
+                            st.metric("Day Change", f"{currency_symbol}{day_change:.2f}", f"{day_change_pct:+.2f}%")
                     
                     with col3:
                         if 'High' in df.columns:
                             period_high = df['High'].max()
-                            st.metric(f"Period High ({lookback_period})", f"${period_high:.2f}")
+                            # 💡 FIX: Use currency_symbol
+                            st.metric(f"Period High ({lookback_period})", f"{currency_symbol}{period_high:.2f}")
                     
                     with col4:
                         if 'Volume' in df.columns:
@@ -289,6 +291,7 @@ else:
             except Exception as e:
                 st.error(f'❌ Error fetching stock data: {e}')
                 st.exception(e)
+                
     # ----------------------------
     # TAB 2: AI Predictions
     # ----------------------------
@@ -299,7 +302,11 @@ else:
             try:
                 with st.spinner(f'🧠 Running AI analysis for {ticker}...'):
                     # Run the full NLP sentiment pipeline with ML predictions
-                    analyzed_df, prediction, fig = nlp_sentiment_pipeline(ticker, forecast_days=forecast_days)
+                    analyzed_df, prediction, fig = nlp_sentiment_pipeline(
+                        ticker, 
+                        forecast_days=forecast_days, 
+                        lookback_period=lookback_period
+                    )
                 
                 if fig is None:
                     st.error("Could not generate predictions. Please check the ticker symbol and try again.")
@@ -461,7 +468,7 @@ else:
         st.subheader(f"📈 Technical Indicators - {ticker}")
         
         if 'stock_data' in st.session_state:
-            df = st.session_state.stock_data
+            df = st.session_state.stock_data.copy() # Use .copy() to avoid modifying session state
             
             # Calculate basic indicators
             if 'Close' in df.columns:
@@ -476,12 +483,20 @@ else:
                 col1, col2, col3 = st.columns(3)
                 
                 with col1:
-                    st.metric("20-Day MA", f"${df['MA_20'].iloc[-1]:.2f}")
+                    # 💡 FIX: Use currency_symbol
+                    st.metric("20-Day MA", f"{currency_symbol}{df['MA_20'].iloc[-1]:.2f}")
                 with col2:
-                    st.metric("50-Day MA", f"${df['MA_50'].iloc[-1]:.2f}")
+                    # 💡 FIX: Use currency_symbol
+                    st.metric("50-Day MA", f"{currency_symbol}{df['MA_50'].iloc[-1]:.2f}")
                 with col3:
-                    st.metric("200-Day MA", f"${df['MA_200'].iloc[-1]:.2f}")
+                    # 💡 FIX: Use currency_symbol
+                    st.metric("200-Day MA", f"{currency_symbol}{df['MA_200'].iloc[-1]:.2f}")
+        else:
+            st.info("Load historical data on the 'Historical Data' tab to see indicators.")
     
+    # ----------------------------
+    # TAB 5: Gemini Summary
+    # ----------------------------
     with tab5:
         st.subheader(f"🧩 AI-Powered Summary - {ticker}")
 
@@ -507,10 +522,14 @@ else:
                         # --- 2. Prepare key data points for the prompt ---
                         current_price = stock_df['Close'].iloc[-1]
                         day_change_pct = ((stock_df['Close'].iloc[-1] / stock_df['Close'].iloc[-2]) - 1) * 100
-                        high_52w = stock_df['High'].tail(252).max()
+                        
+                        # 💡 FIX: Use period high, not fixed 52w
+                        period_high = stock_df['High'].max()
                         
                         trend = prediction_data.get('trend', 'N/A')
                         avg_sentiment = prediction_data.get('avg_sentiment', 0)
+                        
+                        # These values now come with the currency symbol from nlp_sentiment_predictor.py
                         target_30d = prediction_data.get('target_30d', 'N/A')
                         change_30d = prediction_data.get('predicted_change_30d', 'N/A')
                         confidence = prediction_data.get('confidence', 'N/A')
@@ -528,9 +547,9 @@ else:
                         
                         Here is the data:
 
-                        **1. Current Market Data:**
-                        - Current Price: ${current_price:.2f}
-                        - 52-Week High: ${high_52w:.2f}
+                        **1. Current Market Data (Currency: {currency_symbol}):**
+                        - Current Price: {currency_symbol}{current_price:.2f}
+                        - Period High ({lookback_period}): {currency_symbol}{period_high:.2f}
                         - Today's Change: {day_change_pct:+.2f}%
 
                         **2. AI/ML Prediction (XGBoost Model):**
@@ -544,7 +563,7 @@ else:
                         
                         **Your Task:**
                         Write a 3-paragraph summary covering:
-                        1.  **Current Snapshot:** A brief on the stock's current price and recent performance.
+                        1.  **Current Snapshot:** A brief on the stock's current price (in its correct currency) and recent performance.
                         2.  **Sentiment & News:** What is the overall market sentiment (based on the news) and how might this be influencing the stock?
                         3.  **Forward-Looking Outlook:** What does the AI prediction model suggest for the next 30 days? Combine the trend, target, and sentiment into a final concluding thought.
                         
@@ -552,7 +571,6 @@ else:
                         """
 
                         # --- 4. Call Gemini API ---
-                        # The 'gemini_model' variable was already initialized at the top of your script
                         response = gemini_model.generate_content(prompt)
                         
                         # --- 5. Display the output ---
