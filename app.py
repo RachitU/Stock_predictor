@@ -4,12 +4,12 @@ import pandas as pd # Import pandas for data manipulation
 from src.config import db_available, db, OPENAI_API_KEY
 from src.data_collection import get_stock_data, scrape_twitter, scrape_news
 from src.nlp_analysis import analyze_sentiment, process_document
-from src.insights import summarize_insight
+#from src.insights import summarize_insight
 
 st.set_page_config(page_title='SynapseStreet', layout='wide')
 st.title('🧠 SynapseStreet')
 
-# --- Predefined Tickers for Autocomplete/Search Suggestions (MASSIVELY EXPANDED) ---
+# --- Re-add Predefined Tickers for Autocomplete/Search Suggestions (MASSIVELY EXPANDED) ---
 POPULAR_TICKERS = [
     # US Stocks (FAANGM, Tech, Internet)
     'AAPL', 'MSFT', 'GOOGL', 'GOOG', 'AMZN', 'NVDA', 'META', 'NFLX', 'ADBE', 'CRM', 
@@ -45,30 +45,37 @@ POPULAR_TICKERS = [
     'HUL.NS', 'ITC.NS', 'NESTLEIND.NS', 'ASIANPAINT.NS', 'BHARTIARTL.NS', 'TITAN.NS', 'ADANIENT.NS'
 ]
 
+# --- Input Control ---
 st.sidebar.header('Controls')
+
+# The button for scrape is kept in the sidebar
 run_scrape = st.sidebar.button('Scrape Sample Data')
 
 
 st.header('Stock Data Explorer')
 
-# Use st.selectbox for search/autocomplete functionality.
-selected_ticker = st.selectbox(
-    'Search or Select a Stock Ticker (e.g., AAPL, RELIANCE.NS)',
-    options=[''] + POPULAR_TICKERS,
-    index=0
-)
+# New: Add the popular tickers list inside an expander for reference
+with st.expander("View Popular Tickers/Keywords"):
+    st.code(", ".join(POPULAR_TICKERS), language='text')
 
-# Allow manual override if the user types something not in the list
-custom_ticker = st.text_input('Or enter a Custom Ticker', value='')
+# --- MERGED INPUT BOX (using text_input for guaranteed custom input) ---
+# This single text input box now handles both the stock ticker and the scrape keyword.
+# It is replaced by st.text_input to allow any custom input without the "no result" error.
+ticker_or_keyword_raw = st.text_input(
+    'Enter Ticker / Scrape Keyword',
+    # Use a default ticker from the list
+    value='AAPL', 
+    max_chars=30
+).strip()
 
-# Determine the final ticker to use
-ticker = custom_ticker.upper().strip() if custom_ticker.strip() else selected_ticker.upper().strip()
+# Use the selected/typed value as the main ticker/keyword
+ticker = ticker_or_keyword_raw.upper()
 
-# Check if a ticker is available to fetch
+# The main area now only uses the 'ticker' variable
 if ticker:
-    st.markdown(f'**Selected Ticker:** `{ticker}`')
+    st.markdown(f'**Current Ticker/Keyword:** `{ticker}`')
     
-    # Button is now dynamic based on the selected ticker
+    # Button is dynamic based on the selected ticker
     if st.button(f'Load Historical Data for {ticker}', key='fetch_stock_data_btn'):
         try:
             with st.spinner(f'Fetching data for {ticker}...'):
@@ -78,17 +85,16 @@ if ticker:
             if df is None or df.empty:
                 st.error(f'Could not find stock data for ticker: **{ticker}**. Please check the ticker symbol (e.g., use `.NS` for Indian stocks like `RELIANCE.NS`, or `.BO` for BSE stocks).')
             else:
-                st.success(f'Successfully fetched {len(df)} days of data. Showing first 5 rows below:')
+                # --- CHANGE IS HERE: Use df.tail() to show latest data ---
+                st.success(f'Successfully fetched {len(df)} days of data. Showing latest 5 rows below:')
                 
-                # FIX: Flatten the column index. The yfinance call sometimes returns a MultiIndex
-                # even for a single ticker, which causes issues with df['Close'] access.
+                # FIX: Flatten the column index if it is a MultiIndex
                 if isinstance(df.columns, pd.MultiIndex):
                     df.columns = df.columns.to_flat_index()
-                    # Rename the columns if they became tuples, like ('Close', 'TATAMOTORS.NS')
                     df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
                 
-                # Show the raw data first for inspection
-                st.dataframe(df.head())
+                # Show the LATEST data first for inspection
+                st.dataframe(df.tail())
 
                 # Check for valid data before plotting
                 if 'Close' not in df.columns:
@@ -105,30 +111,32 @@ if ticker:
         except Exception as e:
             st.error(f'An error occurred while fetching stock data: {e}')
 else:
-    st.info('Please select or enter a valid stock ticker to load its historical data.')
+    st.info('Please enter a valid stock ticker or keyword to proceed.')
 
-# --- Original Quick Scrape & NLP Section (Unchanged) ---
+# --- Quick Scrape & NLP Section (Updated to use the single input) ---
 st.header('Quick Scrape & NLP (sample)')
 if run_scrape:
-    st.info('Running sample scrapes (Twitter + News) — results stored to DB if configured.')
-    try:
-        t = scrape_twitter('Tesla', limit=10)
-        st.write('Scraped tweets:', t.head(5).to_dict(orient='records'))
-    except Exception as e:
-        st.error('Twitter scrape failed: ' + str(e))
-    try:
-        news_text = scrape_news('https://m.economictimes.com/markets')
-        st.write('Scraped news snippet:', news_text[:400])
-    except Exception as e:
-        st.error('News scrape failed: ' + str(e))
-
-    # process a few tweets (if any)
-    if db_available:
-        samples = list(db.get_collection('tweets').find().limit(5))
-        for s in samples:
-            r = process_document(s)
-            st.write(r)
+    if not ticker:
+        st.warning('Please enter a keyword in the input box before running the scrape.')
     else:
-        st.write('DB not configured; skipping NLP pipeline storage.')
+        st.info(f'Running sample scrapes (Twitter + News) for keyword: **{ticker}** — results stored to DB if configured.')
+        try:
+            # Uses the unified 'ticker' for scraping
+            t = scrape_twitter(ticker, limit=10)
+            st.write('Scraped tweets:', t.head(5).to_dict(orient='records'))
+        except Exception as e:
+            st.error('Twitter scrape failed: ' + str(e))
+        try:
+            news_text = scrape_news('https://m.economictimes.com/markets')
+            st.write('Scraped news snippet:', news_text[:400])
+        except Exception as e:
+            st.error('News scrape failed: ' + str(e))
 
-
+        # process a few tweets (if any)
+        if db_available:
+            samples = list(db.get_collection('tweets').find().limit(5))
+            for s in samples:
+                r = process_document(s)
+                st.write(r)
+        else:
+            st.write('DB not configured; skipping NLP pipeline storage.')
