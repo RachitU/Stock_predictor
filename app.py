@@ -4,7 +4,6 @@ import pandas as pd # Import pandas for data manipulation
 from src.config import db_available, db, OPENAI_API_KEY
 from src.data_collection import get_stock_data, scrape_twitter, scrape_news
 from src.nlp_analysis import analyze_sentiment, process_document
-from src.insights import summarize_insight
 
 st.set_page_config(page_title='SynapseStreet', layout='wide')
 st.title('🧠 SynapseStreet')
