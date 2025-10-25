@@ -131,8 +131,4 @@ if run_scrape:
     else:
         st.write('DB not configured; skipping NLP pipeline storage.')
 
-st.header('AI Insight (OpenAI)')
-user_text = st.text_area('Paste headline / tweet / note to summarize', 'Tesla hiring surge reported.')
-if st.button('Generate Insight'):
-    result = summarize_insight(user_text)
-    st.write(result)
+
