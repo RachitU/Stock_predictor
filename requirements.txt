@@ -1,0 +1,14 @@
+streamlit
+pymongo
+python-dotenv
+yfinance
+vaderSentiment
+pandas
+requests
+beautifulsoup4
+snscrape
+spacy
+networkx
+scikit-learn
+xgboost
+openai
