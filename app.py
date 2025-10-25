@@ -31,9 +31,10 @@ st.markdown("""
     .metric-card {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         padding: 1.5rem;
-        border-radius: 10px;
+        border-radius: 20px;
         color: white;
         box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        
     }
     .stTabs [data-baseweb="tab-list"] {
         gap: 24px;
@@ -42,9 +43,11 @@ st.markdown("""
         height: 50px;
         padding-left: 20px;
         padding-right: 20px;
-        background-color: #f0f2f6;
+        background-color: #080808;
+        color: #ffffff;
         border-radius: 5px;
         font-weight: 600;
+        padding:2px;
     }
     .stTabs [aria-selected="true"] {
         background: linear-gradient(120deg, #2193b0, #6dd5ed);
@@ -384,11 +387,11 @@ else:
                             # Color code sentiment
                             def highlight_sentiment(row):
                                 if row['sentiment_value'] > 0:
-                                    return ['background-color: #d4edda'] * len(row)
+                                    return ['background-color: #008B8B'] * len(row)
                                 elif row['sentiment_value'] < 0:
-                                    return ['background-color: #f8d7da'] * len(row)
+                                    return ['background-color: #E44D2E'] * len(row)
                                 else:
-                                    return ['background-color: #fff3cd'] * len(row)
+                                    return ['background-color: #000000'] * len(row)
                             
                             st.dataframe(
                                 display_df.style.apply(highlight_sentiment, axis=1),

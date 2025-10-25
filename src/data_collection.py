@@ -151,32 +151,46 @@ def get_stock_data(ticker: str, start='2020-01-01'):
         return None
 
 # --- Google News ---
+from dateutil import parser
+from datetime import timezone
+
 def fetch_google_news(stock_name, limit=5, max_age_days=5):
     url = f"https://news.google.com/rss/search?q={stock_name}+stock&hl=en-IN&gl=IN&ceid=IN:en"
-    cutoff = datetime.utcnow() - timedelta(days=max_age_days)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)  # UTC-aware
     articles = []
 
     try:
         r = requests.get(url, timeout=10)
         soup = BeautifulSoup(r.text, "xml")
         for item in soup.find_all("item")[:limit*2]:
-            pub_date = item.pubDate
-            pub_dt = datetime.strptime(pub_date, "%a, %d %b %Y %H:%M:%S %Z") if pub_date else datetime.utcnow()
+            pub_date_text = item.pubDate.text if item.pubDate else None
+            try:
+                pub_dt = parser.parse(pub_date_text) if pub_date_text else datetime.now(timezone.utc)
+                # Ensure pub_dt is UTC-aware
+                if pub_dt.tzinfo is None:
+                    pub_dt = pub_dt.replace(tzinfo=timezone.utc)
+            except Exception:
+                pub_dt = datetime.now(timezone.utc)
+
             if pub_dt < cutoff:
                 continue
+
             articles.append({
                 "source": "Google News",
-                "title": item.title.text.strip(),
-                "link": item.link.text.strip(),
-                "snippet": item.description.text.strip(),
+                "title": item.title.text.strip() if item.title else "",
+                "link": item.link.text.strip() if item.link else "",
+                "snippet": item.description.text.strip() if item.description else "",
                 "timestamp": pub_dt
             })
+
             if len(articles) >= limit:
                 break
+
     except Exception as e:
         print("Google News scrape failed:", e)
 
     return articles
+
 
 # --- Zerodha Pulse ---
 def fetch_zerodha_pulse_news(stock_name, limit=5, max_age_days=5):
