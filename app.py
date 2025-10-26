@@ -1,770 +1,651 @@
-"""
-SynapseStreet - AI-Powered Stock Analysis with Sentiment & ML Predictions
-Includes: Login, Registration, and Session-based Authentication.
-"""
-
 import streamlit as st
 import pandas as pd
 import json
 from pathlib import Path
 import hashlib # For password hashing
-from src.config import db_available, db, OPENAI_API_KEY
+# Keep DB imports ONLY IF pipeline still uses them for something else (like saving news)
+# If not using MongoDB at all, you can remove these:
+# from src.config import db_available, db, OPENAI_API_KEY
+# Assume db_available might still be useful if news saving uses DB
+from src.config import db_available, db
+
 from src.data_collection import get_stock_data, scrape_multiple_news
-from src.nlp_sentiment_predictor import nlp_sentiment_pipeline
+# Ensure pipeline is imported if used
+from src.nlp_sentiment_predictor import nlp_sentiment_pipeline, analyze_sentiment # Import analyze_sentiment if needed separately
 from datetime import datetime, timedelta
+# Import Gemini if used
 import google.generativeai as genai
 import os
 import plotly.graph_objects as go
 import yfinance as yf
-import pytz
+import pytz # Keep if used for timestamps
+import numpy as np # Keep if used
+from dotenv import load_dotenv # Import dotenv
+
+# Load .env file (should happen early)
+load_dotenv()
 
 # --- CONFIGURATION & SETUP ---
 
 # Configure Gemini
-if os.getenv("GEMINI_API_KEY"):
-    genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-    gemini_model = genai.GenerativeModel("gemini-2.5-flash") 
-    # Use a flag for model availability check in summary tab
-    GEMINI_AVAILABLE = True
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY") # Load from .env
+gemini_model = None
+GEMINI_AVAILABLE = False
+if GEMINI_API_KEY:
+    try:
+        # No need to re-import if already done at top
+        genai.configure(api_key=GEMINI_API_KEY)
+        gemini_model = genai.GenerativeModel("gemini-2.5-flash") # Use specific model like flash
+        GEMINI_AVAILABLE = True # Set flag to True on success
+        print("✅ Gemini Configured Successfully")
+    except ImportError:
+        # st.error("❌ Failed to import google.generativeai. Install it (`pip install google-generativeai`)")
+        print("--- ERROR --- Failed to import google.generativeai") # Print error for backend
+    except Exception as e:
+        # st.error(f"❌ Error configuring Gemini: {e}") # Show error in UI if needed
+        print(f"--- ERROR --- Error configuring Gemini: {e}") # Log the error
+        # GEMINI_AVAILABLE remains False, gemini_model remains None
 else:
-    # Handle case where GEMINI_API_KEY is not set
-    GEMINI_AVAILABLE = False
-    st.error("❌ GEMINI_API_KEY environment variable is NOT set.")
+    print("⚠️ GEMINI_API_KEY not set.") # Log this
 
 
-# User Database File Path
-USER_DB_PATH = Path("users.json")
+# --- JSON User Database ---
+USER_DB_PATH = Path("users.json") # Define path for user credentials and watchlists
 
 # Helper Functions for User Management
 def load_users():
     """Loads user data from the JSON file."""
     if USER_DB_PATH.exists():
-        with open(USER_DB_PATH, "r") as f:
-            return json.load(f)
-    return {}
+        try:
+            with open(USER_DB_PATH, "r") as f:
+                content = f.read()
+                if not content: return {} # Handle empty file gracefully
+                return json.loads(content)
+        except json.JSONDecodeError:
+             st.error("Error reading user data file (corrupted?). Starting fresh or correct the file.")
+             return {} # Return empty to allow potential registration
+        except Exception as e:
+             st.error(f"Error loading users: {e}")
+             return {}
+    return {} # Return empty if file doesn't exist
 
 def save_users(users_data):
-    """Saves user data to the JSON file."""
-    with open(USER_DB_PATH, "w") as f:
-        json.dump(users_data, f, indent=4)
+    """Saves user data dictionary to the JSON file."""
+    try:
+        with open(USER_DB_PATH, "w") as f:
+            json.dump(users_data, f, indent=4)
+        print("User data saved successfully.") # Confirmation log
+        return True
+    except Exception as e:
+         st.error(f"Failed to save user data: {e}")
+         return False
 
 def hash_password(password):
-    """Hashes a password using SHA256."""
+    """Hashes a password using SHA256. Simple, consider bcrypt for production."""
+    if not password: raise ValueError("Password cannot be empty")
     return hashlib.sha256(password.encode()).hexdigest()
+
+def check_password_hash(stored_hash, provided_password):
+    """Checks if the provided password matches the stored SHA256 hash."""
+    if not stored_hash or not provided_password:
+        return False
+    return stored_hash == hash_password(provided_password)
 
 def authenticate_user(username, password):
     """Checks credentials against the stored hashed passwords."""
     users = load_users()
-    if username in users and users[username]['password'] == hash_password(password):
+    # Check if username exists and password matches
+    if username in users and check_password_hash(users[username].get('password'), password):
+        # Set session state variables on successful login
         st.session_state['authentication_status'] = True
-        st.session_state['name'] = username
-        # Initialize other session state variables for the main app
-        if 'watchlist' not in st.session_state:
-             st.session_state['watchlist'] = users[username].get('watchlist', [])
+        st.session_state['name'] = username # Use username as the 'name' identifier
+        st.session_state['watchlist'] = users[username].get('watchlist', []) # Load watchlist
+        st.session_state['menu_selection'] = 'App' # Set state to show main app
+        print(f"Authentication successful for {username}") # Debug print
         return True
     else:
+        print(f"Authentication failed for {username}") # Debug print
         st.session_state['authentication_status'] = False
         return False
 
 def logout_user():
-    """Clears session state and resets for login."""
+    """Clears relevant session state variables and resets page state for login."""
+    print("Logging out user...") # Debug print
+    # List of keys specific to user session or analysis results
+    keys_to_clear = [
+        'authentication_status', 'name', 'watchlist', 'menu_selection',
+        'stock_data', 'stock_info', 'prediction', 'prediction_fig',
+        'analyzed_df', 'gemini_summary', 'summary_ticker',
+        'loaded_ticker', 'selected_ticker', 'analysis_ticker',
+        'run_analysis_on_select', 'load_data_on_select' # Clear flags too
+    ]
+    for key in keys_to_clear:
+        if key in st.session_state:
+            del st.session_state[key]
+    # Explicitly set status to None and page to Login after clearing
     st.session_state['authentication_status'] = None
-    st.session_state['name'] = None
     st.session_state['menu_selection'] = 'Login'
-    # Clear stock analysis data on logout
-    if 'stock_data' in st.session_state: del st.session_state.stock_data
-    if 'prediction_fig' in st.session_state: del st.session_state.prediction_fig
-    st.rerun()
+    st.rerun() # Force rerun to display login page
 
-# Initialize Session State for Authentication and Watchlist
-if 'authentication_status' not in st.session_state:
-    st.session_state['authentication_status'] = None 
-if 'name' not in st.session_state:
-    st.session_state['name'] = None
-if 'menu_selection' not in st.session_state:
-    st.session_state['menu_selection'] = 'Login'
+# --- Initialize Session State ---
+# Ensures keys exist on the very first run of the session
+if 'authentication_status' not in st.session_state: st.session_state['authentication_status'] = None
+if 'name' not in st.session_state: st.session_state['name'] = None
+if 'menu_selection' not in st.session_state: st.session_state['menu_selection'] = 'Login'
+if 'watchlist' not in st.session_state: st.session_state['watchlist'] = []
+if 'selected_ticker' not in st.session_state: st.session_state.selected_ticker = ""
 
 
-# Page Configuration
+# --- Page Configuration (Set Once) ---
 st.set_page_config(
     page_title='SynapseStreet - AI Stock Predictor',
     layout='wide',
-    initial_sidebar_state='expanded',
+    initial_sidebar_state='auto', # Let Streamlit decide based on width, or use 'expanded'
     page_icon='🧠'
 )
 
-# Custom CSS for better UI (keeping original)
+# --- Custom CSS ---
 st.markdown("""
 <style>
-    .main-header {
-        font-size: 3rem;
-        font-weight: 700;
-        background: linear-gradient(120deg, #2193b0, #6dd5ed);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        margin-bottom: 0.5rem;
-    }
-    .stTabs [data-baseweb="tab-list"] {
-        gap: 24px;
-    }
-    .stTabs [data-baseweb="tab"] {
-        height: 50px;
-        padding-left: 20px;
-        padding-right: 20px;
-        background-color: #080808;
-        color: #ffffff;
-        border-radius: 5px;
-        font-weight: 600;
-        padding:2px;
-    }
-    .stTabs [aria-selected="true"] {
-        background: linear-gradient(120deg, #2193b0, #6dd5ed);
-        color: white;
-    }
+    /* ... Your existing CSS rules ... */
+    .main-header { font-size: 3rem; font-weight: 700; background: linear-gradient(120deg, #2193b0, #6dd5ed); -webkit-background-clip: text; -webkit-text-fill-color: transparent; margin-bottom: 0.5rem; }
 </style>
 """, unsafe_allow_html=True)
 
-# Title and Header (always visible)
-st.markdown('<h1 class="main-header">🧠 SynapseStreet</h1>', unsafe_allow_html=True)
-st.markdown("AI-Powered Stock Analysis combining Sentiment & Machine Learning")
 
-
-# --- LOGIN AND REGISTRATION PAGES ---
+# --- LOGIN AND REGISTRATION PAGE FUNCTIONS ---
 
 def registration_page():
-    st.header('📝 New User Registration')
+    st.markdown('<h1 class="main-header" style="text-align: center;">🧠 Register</h1>', unsafe_allow_html=True)
+    col1, col2, col3 = st.columns([1, 1.5, 1]) # Centering
+    with col2:
+        with st.form("Registration_form"):
+            st.subheader("Create New Account") # Added subheader
+            new_username = st.text_input("Choose Username", max_chars=20) # Slightly longer max chars
+            new_password = st.text_input("Choose Password (min 6 chars)", type="password")
+            confirm_password = st.text_input("Confirm Password", type="password")
+            submitted = st.form_submit_button("Register", type="primary", use_container_width=True)
 
-    with st.form("Registration_form"):
-        new_username = st.text_input("Choose Username (must be unique)", max_chars=15)
-        new_password = st.text_input("Choose Password", type="password")
-        confirm_password = st.text_input("Confirm Password", type="password")
-        submitted = st.form_submit_button("Register", type="primary", use_container_width=True)
+            if submitted:
+                users = load_users() # Load current users
+                # Perform all validations
+                if not new_username: st.error("Username cannot be empty.")
+                elif not new_password: st.error("Password cannot be empty.")
+                elif new_username in users: st.error("Username already taken.")
+                elif new_password != confirm_password: st.error("Passwords do not match.")
+                elif len(new_password) < 6: st.error("Password must be at least 6 characters.")
+                else:
+                    # If all checks pass, add user
+                    users[new_username] = {
+                        'password': hash_password(new_password),
+                        'watchlist': ['AAPL', 'GOOGL', 'TSLA'] # Sensible default watchlist
+                    }
+                    if save_users(users): # Attempt to save
+                        st.success("✅ Registration successful! Please log in.")
+                        st.session_state['menu_selection'] = 'Login'
+                        st.rerun() # Go to login page
+                    # else: Error message shown by save_users()
 
-        if submitted:
-            users = load_users()
-            if not new_username:
-                st.error("Username cannot be empty.")
-            elif new_username in users:
-                st.error("Username already taken.")
-            elif new_password != confirm_password:
-                st.error("Passwords do not match.")
-            elif len(new_password) < 6:
-                st.error("Password must be at least 6 characters.")
-            else:
-                users[new_username] = {
-                    'password': hash_password(new_password),
-                    'watchlist': ['AAPL', 'MSFT', 'TSLA'] # Default watchlist
-                }
-                save_users(users)
-                st.success("✅ Registration successful! Please log in.")
-                st.session_state['menu_selection'] = 'Login'
-                st.rerun()
-                
-    st.markdown("---")
-    if st.button("Go to Login", use_container_width=True):
-        st.session_state['menu_selection'] = 'Login'
-        st.rerun()
-    st.sidebar.caption("---")
-
+        st.divider()
+        if st.button("Go back to Login", use_container_width=True):
+            st.session_state['menu_selection'] = 'Login'
+            st.rerun()
 
 def login_page():
-    st.header('🔒 User Login')
-    
-    with st.form("Login_form"):
-        username = st.text_input("Username")
-        password = st.text_input("Password", type="password")
-        submitted = st.form_submit_button("Login", type="primary", use_container_width=True)
-        
-        if submitted:
-            if authenticate_user(username, password):
-                # Watchlist loaded inside authenticate_user
-                st.rerun() 
-            else:
-                st.error("Invalid username or password. Please try again or register.")
-                
-    st.markdown("---")
-    if st.button("Register New User", use_container_width=True):
-        st.session_state['menu_selection'] = 'Register'
-        st.rerun()
-    
-    if not USER_DB_PATH.exists() or not load_users():
-         st.info("No registered users found. Please register an account.")
-         
-    st.sidebar.caption("---")
-
-
-# --- MAIN APPLICATION LOGIC ---
-
-# Check authentication status first
-if not st.session_state['authentication_status']:
-    # Sidebar: Menu and Status when NOT logged in
-    with st.sidebar:
-        st.header('🔑 Authentication')
-        # Display general API status for visibility
-        if db_available: st.success("✅ Database Connected")
-        else: st.warning("⚠ Database Offline")
-        if os.getenv("GEMINI_API_KEY"): st.success("✅ Gemini API Ready")
-        else: st.error("❌ GEMINI_API_KEY NOT set")
-        if OPENAI_API_KEY: st.success("✅ OpenAI API Ready")
-        else: st.info("ℹ OpenAI API Not Configured")
-
-    # Main Area: Show Login or Register page
-    if st.session_state['menu_selection'] == 'Register':
-        registration_page()
-    else:
-        login_page()
-    
-    # Stop execution here if not logged in
-    st.stop()
-
-
-# --- IF LOGGED IN, CONTINUE TO MAIN APP ---
-
-# --- Predefined Tickers (keeping original list) ---
-POPULAR_TICKERS = [
-    'AAPL', 'MSFT', 'GOOGL', 'GOOG', 'AMZN', 'NVDA', 'META', 'NFLX', 'ADBE', 'CRM', 
-    'TSLA', 'AMD', 'INTC', 'CSCO', 'QCOM', 'JPM', 'BAC', 'WFC', 'GS', 'MS', 'V', 'MA', 'AXP',
-    'JNJ', 'PFE', 'LLY', 'UNH', 'MRK', 'ABBV', 'TMO',
-    'PG', 'KO', 'PEP', 'WMT', 'COST', 'HD', 'LOW', 'NKE', 'MCD',
-    'BA', 'CAT', 'GE', 'LMT', 'XOM', 'CVX', 'DUK', 'NEE',
-    'TCS.NS', 'INFY.NS', 'WIPRO.NS', 'HCLTECH.NS', 'TECHM.NS',
-    'HDFCBANK.NS', 'ICICIBANK.NS', 'SBIN.NS', 'AXISBANK.NS', 'KOTAKBANK.NS', 'BAJFINANCE.NS',
-    'RELIANCE.NS', 'LT.NS', 'MARUTI.NS', 'TATAMOTORS.NS', 'M&M.NS', 'ULTRACEMCO.NS',
-    'SUNPHARMA.NS', 'DRREDDY.NS', 'APOLLOHOSP.NS',
-    'HUL.NS', 'ITC.NS', 'NESTLEIND.NS', 'ASIANPAINT.NS', 'BHARTIARTL.NS', 'TITAN.NS', 'ADANIENT.NS'
-]
-
-# --- Sidebar Configuration (Logged In) ---
-with st.sidebar:
-    st.image("https://img.icons8.com/fluency/96/artificial-intelligence.png", width=80)
-    st.header('🎛 Controls')
-    st.success(f"👋 Logged in as *{st.session_state['name']}*")
-    st.button('🏃 Logout', on_click=logout_user, use_container_width=True)
-    st.divider()
-
-    # Combine popular and user-specific watchlist for the main dropdown
-    available_tickers = sorted(list(set(POPULAR_TICKERS + st.session_state.get('watchlist', []))))
-
-    # Selected Ticker Logic (checks if a button was clicked via session state)
-    if 'selected_ticker' in st.session_state and st.session_state.selected_ticker:
-        pre_selected_ticker = st.session_state.selected_ticker
-        del st.session_state.selected_ticker
-    else:
-        pre_selected_ticker = ''
-
-    try:
-        default_index = available_tickers.index(pre_selected_ticker) if pre_selected_ticker in available_tickers else 0
-    except ValueError:
-        default_index = 0
-
-    ticker = st.selectbox(
-        '📊 Select Stock Ticker',
-        options=[''] + available_tickers,
-        index=default_index + 1 if pre_selected_ticker in available_tickers else 0,
-        placeholder="Type to search...",
-        help="Select or type a stock ticker symbol"
-    ).strip().upper()
-    
-    st.divider()
-    # Analysis Options (Original code)
-    st.subheader("Analysis Options")
-    
-    forecast_days = st.slider(
-        "Forecast Period (days)",
-        min_value=7,
-        max_value=90,
-        value=30,
-        step=1,
-        help="Number of days to forecast ahead"
-    )
-    
-    lookback_period = st.selectbox(
-        "Historical Data Period",
-        options=['1mo', '3mo', '6mo', '1y', '2y', '5y'],
-        index=3,
-        help="Amount of historical data to fetch (Min 6mo recommended for AI)"
-    )
-    
-    st.divider()
-    
-    # Action Buttons (Original code)
-    run_analysis = st.button(
-        '🚀 Run Full Analysis',
-        type='primary',
-        use_container_width=True,
-        help="Fetch news, analyze sentiment, and generate predictions"
-    )
-    
-    refresh_data = st.button(
-        '🔄 Refresh Data Only',
-        use_container_width=True,
-        help="Update stock data without running predictions"
-    )
-    
-    st.divider()
-    
-    # Database Status
-    if db_available:
-        st.success("✅ Database Connected")
-    else:
-        st.warning("⚠ Database Offline")
-    
-    # API Status
-    if OPENAI_API_KEY:
-        st.success("✅ OpenAI API Ready")
-    else:
-        st.info("ℹ OpenAI API Not Configured")
-
-# --- Main Content Area (Protected) ---
-if not ticker:
-    # Landing Page
-    st.info("👈 Please select a stock ticker from the sidebar to begin analysis")
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.markdown("### 📰 News Sentiment")
-        st.write("Real-time sentiment analysis from multiple news sources using FinBERT")
-    
+    st.markdown('<h1 class="main-header" style="text-align: center;">🧠 Login</h1>', unsafe_allow_html=True)
+    col1, col2, col3 = st.columns([1, 1.5, 1]) # Centering
     with col2:
-        st.markdown("### 🤖 ML Predictions")
-        st.write("XGBoost-powered forecasting with technical indicators and sentiment features")
-    
-    with col3:
-        st.markdown("### 📈 Visualizations")
-        st.write("Interactive charts showing historical data, predictions, and confidence bands")
-    
-    st.divider()
-    
-    # Popular Stocks Quick Access
-    st.subheader("🔥 Quick Access - Popular Stocks")
-    
-    quick_cols = st.columns(6)
-    quick_tickers = ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA', 'AMZN']
-    
-    for idx, qt in enumerate(quick_tickers):
-        with quick_cols[idx]:
-            if st.button(qt, key=f"pop_quick_{qt}", use_container_width=True):
-                st.session_state.selected_ticker = qt
-                st.rerun()
+        # Display error message from previous failed attempt if exists
+        if st.session_state.get('authentication_status') == False:
+            st.error("Invalid username or password.")
+            st.session_state.authentication_status = None # Reset status after showing error
 
-else:
-    # Main Analysis Interface
-    st.markdown(f"## Analysis for *{ticker}*")
-    
-    # Determine currency symbol
-    currency_symbol = "₹" if ticker.endswith(".NS") else "$"
-    
-    # Create tabs for different views
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-        "📊 Historical Data",
-        "🔮 AI Predictions",
-        "📰 Data and Tally",
-        "📈 Technical Indicators",
-        "🧩 Summary Insights",
-        "🏢 Company Profile"
-    ])
-    
-    # Helper function to convert 'lookback_period' string to a start date
-    def get_start_date_from_period(period_str):
-        today = datetime.now()
-        if period_str == '1mo': return today - timedelta(days=30)
-        elif period_str == '3mo': return today - timedelta(days=90)
-        elif period_str == '6mo': return today - timedelta(days=182)
-        elif period_str == '1y': return today - timedelta(days=365)
-        elif period_str == '2y': return today - timedelta(days=730)
-        elif period_str == '5y': return today - timedelta(days=1825)
-        else: return today - timedelta(days=365)
-    
-    # ----------------------------
-    # TAB 1: Historical Data
-    # ----------------------------
-    with tab1:
-        st.subheader(f"Historical Stock Data - {ticker}")
-        
-        # Part 1: Data Fetching (runs only when button is pressed)
-        if refresh_data or run_analysis or st.button("Load Historical Data", key="load_hist"):
-            try:
-                start_date = get_start_date_from_period(lookback_period)
-                start_date_str = start_date.strftime('%Y-%m-%d')
-                
-                with st.spinner(f'Fetching data since {start_date_str} for {ticker}...'):
-                    # Assuming get_stock_data can handle the start date argument
-                    df = get_stock_data(ticker, start=start_date_str)
-                
-                if df is None or df.empty:
-                    st.error(f'Could not find stock data for ticker: *{ticker}*')
-                    if 'stock_data' in st.session_state: del st.session_state.stock_data
-                else:
-                    st.success(f'✅ Successfully fetched {len(df)} rows of data')
-                    st.session_state.stock_data = df
-                    
-                    with st.spinner("Fetching company profile..."):
-                        stock_info = yf.Ticker(ticker).info
-                        st.session_state.stock_info = stock_info
+        with st.form("Login_form"):
+            username = st.text_input("Username")
+            password = st.text_input("Password", type="password")
+            submitted = st.form_submit_button("Login", type="primary", use_container_width=True)
 
-            except Exception as e:
-                st.error(f'❌ Error fetching stock data: {e}')
-                st.exception(e)
-                if 'stock_data' in st.session_state: del st.session_state.stock_data
+            if submitted:
+                print(f"--- DEBUG --- Login attempt for: {username}")
+                if authenticate_user(username, password):
+                    print(f"--- DEBUG --- Login success for {username}. Rerunning.")
+                    # State changes handled in authenticate_user()
+                    st.rerun() # Redirects to 'App' state defined in authenticate_user
+                # else: authenticate_user sets status to False, error shown on next rerun
 
-        # Part 2: Data Display
-        if 'stock_data' in st.session_state:
-            df = st.session_state.stock_data
-            
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.to_flat_index()
-                df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
-            
-            # Display metrics
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                current_price = df['Close'].iloc[-1]
-                st.metric("Current Price", f"{currency_symbol}{current_price:.2f}")
-            with col2:
-                day_change = df['Close'].iloc[-1] - df['Close'].iloc[-2]
-                day_change_pct = (day_change / df['Close'].iloc[-2]) * 100
-                st.metric("Day Change", f"{currency_symbol}{day_change:.2f}", f"{day_change_pct:+.2f}%")
-            with col3:
-                period_high = df['High'].max()
-                st.metric(f"Period High ({lookback_period})", f"{currency_symbol}{period_high:.2f}")
-            with col4:
-                avg_volume = df['Volume'].tail(20).mean()
-                st.metric("Avg Volume (20D)", f"{avg_volume/1e6:.2f}M")
-            
-            # Data table and Price chart (rest of Tab 1 logic)
-            st.divider()
-            st.subheader(f"Data Table ({lookback_period})")
-            st.dataframe(df, use_container_width=True, height=400)
-            
-            st.divider()
-            col1, col2 = st.columns([3, 1])
-            with col1: st.subheader(f"Price History ({lookback_period})")
-            with col2:
-                chart_type_tab1 = st.radio("Select Chart Type", ["Line", "Candlestick"], horizontal=True, key="chart_toggle_tab1", label_visibility="collapsed")
+        st.divider()
+        if st.button("Register New User", use_container_width=True):
+            st.session_state['menu_selection'] = 'Register'
+            st.rerun()
 
-            if chart_type_tab1 == "Line":
-                st.line_chart(df['Close'], use_container_width=True)
-            else:
-                fig = go.Figure(data=[go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name=ticker)])
-                fig.update_layout(xaxis_rangeslider_visible=False, yaxis_title=f"Price ({currency_symbol})")
-                st.plotly_chart(fig, use_container_width=True)
-            
-    # ----------------------------
-    # TAB 2: AI Predictions
-    # ----------------------------
-    with tab2:
-        st.subheader(f"🔮 AI-Powered Price Predictions - {ticker}")
-        
-        if run_analysis or st.button("Generate Predictions", key="gen_pred", type="primary"):
-            
-            if lookback_period in ['1mo', '3mo']:
-                st.error("❌ Insufficient Data for AI. Please select a 'Historical Data Period' of 6mo or more to run predictions.")
-            else:
-                try:
-                    with st.spinner(f'🧠 Running AI analysis for {ticker}...'):
-                        # THE FIX IS HERE: nlp_sentiment_pipeline now accepts lookback_period
-                        analyzed_df, prediction, fig = nlp_sentiment_pipeline(
-                            ticker, 
-                            forecast_days=forecast_days, 
-                            lookback_period=lookback_period
-                        )
-                    
-                    if fig is None:
-                        st.error("Could not generate predictions. Please check the ticker symbol and try again.")
-                    else:
-                        st.session_state.prediction = prediction
-                        st.session_state.prediction_fig = fig
-                        st.session_state.analyzed_df = analyzed_df
-                        
-                        st.success("✅ Prediction generated successfully!")
-                        
-                        col1, col2, col3, col4 = st.columns(4)
-                        with col1: st.metric("Trend", prediction.get('trend', 'N/A'))
-                        with col2: st.metric("Sentiment Score", f"{prediction.get('avg_sentiment', 0):+.3f}")
-                        with col3: st.metric("7-Day Target", prediction.get('target_7d', 'N/A'), prediction.get('predicted_change_7d', 'N/A'))
-                        with col4: st.metric("30-Day Target", prediction.get('target_30d', 'N/A'), prediction.get('predicted_change_30d', 'N/A'))
-                        
-                        st.divider()
-                        confidence = prediction.get('confidence', 'Unknown')
-                        if confidence == 'High': st.success(f"🎯 Confidence Level: *{confidence}*")
-                        elif confidence == 'Medium': st.info(f"📊 Confidence Level: *{confidence}*")
-                        else: st.warning(f"⚠ Confidence Level: *{confidence}*")
-                        
-                        st.divider()
-                        st.plotly_chart(fig, use_container_width=True)
-                        
-                        with st.expander("📋 Prediction Details"): st.json(prediction)
-                        
-                        st.divider()
-                        if st.button("💾 Save Prediction Chart"):
-                            os.makedirs("predictions", exist_ok=True)
-                            fig.write_html(f"predictions/{ticker}forecast{datetime.now().strftime('%Y%m%d_%H%M%S')}.html")
-                            st.success(f"✅ Chart saved to predictions/{ticker}_forecast.html")
-                            
-                except Exception as e:
-                    st.error(f"❌ Error generating predictions: {e}")
-                    st.exception(e)
-        
-        elif 'prediction_fig' in st.session_state:
-            st.info("Showing cached prediction. Click 'Generate Predictions' to update.")
-            st.plotly_chart(st.session_state.prediction_fig, use_container_width=True)
-    
-    # ----------------------------
-    # TAB 3: Sentiment Analysis
-    # ----------------------------
-    with tab3:
-        st.subheader(f"📰 News Sentiment Analysis - {ticker}")
+        # Suggest registration if user file doesn't exist or is empty
+        if not USER_DB_PATH.exists() or not load_users():
+             st.info("No users found. Please register an account.")
 
-        # Function to highlight sentiment (defined outside to avoid redefinition)
-        def highlight_sentiment(row):
-            sentiment_val = row.get('sentiment_value', 0)
-            if sentiment_val > 0: return ['background-color: #008B8B'] * len(row)
-            elif sentiment_val < 0: return ['background-color: #E44D2E'] * len(row)
-            else: return ['background-color: #080808'] * len(row)
 
-        if run_analysis or st.button("Fetch Latest News", key="fetch_news"):
-            try:
-                with st.spinner(f'Fetching and analyzing news for {ticker}...'):
-                    # Fetch fresh news
-                    news_df_raw = scrape_multiple_news(ticker, limit=10)
+# --- MAIN APPLICATION ROUTING ---
 
-                    if news_df_raw.empty:
-                        st.warning("No recent news found for this ticker.")
-                        if 'analyzed_df' in st.session_state: del st.session_state['analyzed_df']
-                    else:
-                        st.success(f"✅ Found {len(news_df_raw)} news articles")
+# Check authentication status first (using .get for safety)
+# If True, render the main app. Otherwise, render login/register.
+if not st.session_state.get('authentication_status'):
+    # Show Login or Register page based on menu_selection state
+    if st.session_state.get('menu_selection') == 'Register':
+        registration_page()
+    else: # Default to Login
+        login_page()
+    # No st.stop() needed here, execution ends naturally if not authenticated
 
-                        # Use cached analysis if available from run_analysis, otherwise re-analyze
-                        if 'analyzed_df' in st.session_state and not st.session_state.analyzed_df.empty:
-                            analyzed_df = st.session_state.analyzed_df
-                        else:
-                            analyzed_df = analyze_sentiment(news_df_raw)
-                            st.session_state.analyzed_df = analyzed_df # Store it
+else: # --- IF LOGGED IN, CONTINUE TO MAIN APP ---
+    # (User is authenticated if this point is reached)
+    print(f"--- DEBUG --- Rendering Main App for user: {st.session_state.get('name')}")
 
-                        # Store news to database
-                        if db_available:
-                            collection = db.get_collection("news_articles")
-                            data_to_insert = news_df_raw.to_dict(orient="records")
-                            for item in data_to_insert:
-                                item["ticker"] = ticker
-                                if 'timestamp' in item and not isinstance(item['timestamp'], datetime):
-                                    item['timestamp'] = pd.to_datetime(item['timestamp']).to_pydatetime()
-                                elif 'timestamp' not in item:
-                                    item['timestamp'] = datetime.utcnow()
-                                if isinstance(item.get('timestamp'), datetime) and item['timestamp'].tzinfo:
-                                    item['timestamp'] = item['timestamp'].astimezone(pytz.utc).replace(tzinfo=None)
+    # --- Predefined Tickers ---
+    POPULAR_TICKERS = [ # Keep your original list here
+        'AAPL', 'MSFT', 'GOOGL', 'GOOG', 'AMZN', 'NVDA', 'META', 'NFLX', 'ADBE', 'CRM',
+        'TSLA', 'AMD', 'INTC', 'CSCO', 'QCOM', 'JPM', 'BAC', 'WFC', 'GS', 'MS', 'V', 'MA', 'AXP',
+        'JNJ', 'PFE', 'LLY', 'UNH', 'MRK', 'ABBV', 'TMO',
+        'PG', 'KO', 'PEP', 'WMT', 'COST', 'HD', 'LOW', 'NKE', 'MCD',
+        'BA', 'CAT', 'GE', 'LMT', 'XOM', 'CVX', 'DUK', 'NEE',
+        'TCS.NS', 'INFY.NS', 'WIPRO.NS', 'HCLTECH.NS', 'TECHM.NS',
+        'HDFCBANK.NS', 'ICICIBANK.NS', 'SBIN.NS', 'AXISBANK.NS', 'KOTAKBANK.NS', 'BAJFINANCE.NS',
+        'RELIANCE.NS', 'LT.NS', 'MARUTI.NS', 'TATAMOTORS.NS', 'M&M.NS', 'ULTRACEMCO.NS',
+        'SUNPHARMA.NS', 'DRREDDY.NS', 'APOLLOHOSP.NS',
+        'HUL.NS', 'ITC.NS', 'NESTLEIND.NS', 'ASIANPAINT.NS', 'BHARTIARTL.NS', 'TITAN.NS', 'ADANIENT.NS'
+    ]
 
-                            try:
-                                collection.insert_many(data_to_insert)
-                                st.info("📦 News articles saved to database")
-                            except Exception as db_err:
-                                st.warning(f"⚠ Could not save news to DB: {db_err}")
+    # --- Sidebar Configuration (Logged In) ---
+    with st.sidebar:
+        st.image("https://img.icons8.com/fluency/96/artificial-intelligence.png", width=80)
+        st.header('🎛 Controls')
+        st.success(f"👋 Logged in as *{st.session_state.get('name')}*")
+        st.button('🏃 Logout', on_click=logout_user, use_container_width=True)
+        st.divider()
 
-                        # Display analyzed sentiment
-                        if not analyzed_df.empty:
-                            st.divider(); st.subheader("Sentiment Distribution")
-                            sentiment_counts = analyzed_df['sentiment'].value_counts()
-                            col1, col2, col3 = st.columns(3)
-                            with col1: st.metric("🟢 Positive", sentiment_counts.get('positive', 0) + sentiment_counts.get('POSITIVE', 0))
-                            with col2: st.metric("🟡 Neutral", sentiment_counts.get('neutral', 0) + sentiment_counts.get('NEUTRAL', 0))
-                            with col3: st.metric("🔴 Negative", sentiment_counts.get('negative', 0) + sentiment_counts.get('NEGATIVE', 0))
-
-                            st.divider(); st.subheader("Detailed Sentiment Breakdown")
-                            display_cols = ['timestamp', 'title', 'sentiment', 'score', 'sentiment_value', 'source']
-                            display_df = analyzed_df[display_cols].copy()
-                            if 'timestamp' in display_df.columns:
-                                display_df['timestamp'] = pd.to_datetime(display_df['timestamp']).dt.strftime('%Y-%m-%d %H:%M')
-                                display_df.rename(columns={'timestamp': 'Date/Time'}, inplace=True)
-
-                            st.dataframe(display_df.style.apply(highlight_sentiment, axis=1), use_container_width=True, height=400, hide_index=True)
-
-                        else: st.info("Run 'Generate Predictions' or 'Fetch Latest News' to see sentiment analysis.")
-
-            except Exception as e:
-                st.error(f"❌ Error fetching/analyzing sentiment: {e}")
-                st.exception(e)
-
-        # Display cached sentiment if available
-        elif 'analyzed_df' in st.session_state and not st.session_state.analyzed_df.empty:
-            st.info("Showing cached sentiment analysis. Click 'Fetch Latest News' or 'Run Full Analysis' to update.")
-            analyzed_df = st.session_state.analyzed_df
-            
-            st.divider(); st.subheader("Sentiment Distribution")
-            sentiment_counts = analyzed_df['sentiment'].value_counts()
-            col1, col2, col3 = st.columns(3)
-            with col1: st.metric("🟢 Positive", sentiment_counts.get('positive', 0) + sentiment_counts.get('POSITIVE', 0))
-            with col2: st.metric("🟡 Neutral", sentiment_counts.get('neutral', 0) + sentiment_counts.get('NEUTRAL', 0))
-            with col3: st.metric("🔴 Negative", sentiment_counts.get('negative', 0) + sentiment_counts.get('NEGATIVE', 0))
-            
-            st.divider(); st.subheader("Detailed Sentiment Breakdown")
-            display_cols = ['timestamp', 'title', 'sentiment', 'score', 'sentiment_value', 'source']
-            display_df = analyzed_df[display_cols].copy()
-            if 'timestamp' in display_df.columns:
-                display_df['timestamp'] = pd.to_datetime(display_df['timestamp']).dt.strftime('%Y-%m-%d %H:%M')
-                display_df.rename(columns={'timestamp': 'Date/Time'}, inplace=True)
-            st.dataframe(display_df.style.apply(highlight_sentiment, axis=1), use_container_width=True, hide_index=True)
-
-        else: st.info("Click 'Fetch Latest News' or 'Run Full Analysis' to see news sentiment.")
-    
-    # ----------------------------
-    # TAB 4: Technical Indicators
-    # ----------------------------
-    with tab4:
-        st.subheader(f"📈 Technical Indicators - {ticker}")
-        
-        if 'stock_data' in st.session_state:
-            df = st.session_state.stock_data.copy()
-            
-            if 'Close' in df.columns:
-                df['MA_20'] = df['Close'].rolling(window=20).mean()
-                df['MA_50'] = df['Close'].rolling(window=50).mean()
-                df['MA_200'] = df['Close'].rolling(window=200).mean()
-                
-                col1, col2 = st.columns([3, 1])
-                with col1: st.subheader("Price vs. Moving Averages")
-                with col2:
-                    chart_type_tab4 = st.radio("Select Chart Type", ["Line", "Candlestick"], horizontal=True, key="chart_toggle_tab4", label_visibility="collapsed")
-
-                chart_df = df.tail(252)
-
-                if chart_type_tab4 == "Line":
-                    st.line_chart(chart_df[['Close', 'MA_20', 'MA_50', 'MA_200']], use_container_width=True)
-                else:
-                    fig = go.Figure()
-                    fig.add_trace(go.Candlestick(x=chart_df.index, open=chart_df['Open'], high=chart_df['High'], low=chart_df['Low'], close=chart_df['Close'], name="Price"))
-                    fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['MA_20'], mode='lines', name='MA 20', line=dict(color='yellow', width=1)))
-                    fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['MA_50'], mode='lines', name='MA 50', line=dict(color='orange', width=1)))
-                    fig.add_trace(go.Scatter(x=chart_df.index, y=chart_df['MA_200'], mode='lines', name='MA 200', line=dict(color='red', width=1)))
-                    
-                    fig.update_layout(xaxis_rangeslider_visible=False, yaxis_title=f"Price ({currency_symbol})", legend_title="Legend")
-                    st.plotly_chart(fig, use_container_width=True)
-                
-                st.divider(); st.subheader("Current Indicator Values")
-                col1, col2, col3 = st.columns(3)
-                with col1: st.metric("20-Day MA", f"{currency_symbol}{df['MA_20'].iloc[-1]:.2f}")
-                with col2: st.metric("50-Day MA", f"{currency_symbol}{df['MA_50'].iloc[-1]:.2f}")
-                with col3: st.metric("200-Day MA", f"{currency_symbol}{df['MA_200'].iloc[-1]:.2f}")
+        # --- Watchlist Display & Edit ---
+        st.subheader("My Watchlist")
+        user_watchlist = st.session_state.get('watchlist', []) # Get from session state
+        if not user_watchlist:
+            st.info("Your watchlist is empty.")
         else:
-            st.info("Load historical data on the 'Historical Data' tab to see indicators.")
-    
-    # ----------------------------
-    # TAB 5: Gemini Summary
-    # ----------------------------
-    with tab5:
-        st.subheader(f"🧩 AI-Powered Summary - {ticker}")
-        
-        if st.button("Generate AI Summary", key="gen_summary", type="primary", use_container_width=True):
-            
-            if 'stock_data' not in st.session_state or st.session_state.stock_data.empty: st.warning("⚠ Please load historical data in Tab 1 first.")
-            elif 'prediction' not in st.session_state: st.warning("⚠ Please run 'Generate Predictions' in Tab 2 first.")
-            elif 'analyzed_df' not in st.session_state: st.warning("⚠ Sentiment data not found. Please run 'Generate Predictions' in Tab 2.")
-            elif not GEMINI_AVAILABLE: st.error("❌ GEMINI_API_KEY is not set. Cannot generate summary.")
-            
-            else:
+            st.write("Click ticker to analyze:") # Instruction
+            cols = st.columns(3) # Adjust column count as needed
+            col_idx = 0
+            for item in sorted(user_watchlist):
+                with cols[col_idx % 3]:
+                    if st.button(item, key=f"watch_{item}", use_container_width=True):
+                        print(f"--- DEBUG --- Watchlist button clicked: {item}")
+                        st.session_state.selected_ticker = item # Update selected ticker
+                        # --- ⚙️ FLAG TO RUN ANALYSIS ON SELECT ---
+                        st.session_state.run_analysis_on_select = True
+                        # --- ⚙️ FLAG TO ENSURE DATA LOADS ---
+                        st.session_state.load_data_on_select = True
+                        # Clear previous analysis data
+                        keys_to_clear = ['stock_data', 'stock_info', 'prediction', 'prediction_fig', 'analyzed_df', 'gemini_summary', 'summary_ticker', 'loaded_ticker', 'analysis_ticker']
+                        for key in keys_to_clear:
+                            if key in st.session_state: del st.session_state[key]
+                        st.rerun()
+                col_idx += 1
+
+        with st.expander("✏️ Edit Watchlist"):
+            add_ticker_input = st.text_input("Add Ticker", key="add_ticker").strip().upper()
+            if st.button("Add"): # Add Button Logic
+                if add_ticker_input and add_ticker_input not in user_watchlist:
+                    try: # Validate
+                        if not yf.Ticker(add_ticker_input).history(period='1d').empty:
+                            user_watchlist.append(add_ticker_input)
+                            users_data = load_users()
+                            # Ensure user exists in data (should always be true if logged in)
+                            if st.session_state['name'] in users_data:
+                                 users_data[st.session_state['name']]['watchlist'] = sorted(user_watchlist)
+                                 if save_users(users_data):
+                                     st.session_state['watchlist'] = sorted(user_watchlist) # Update state
+                                     st.success(f"`{add_ticker_input}` added.")
+                                     st.rerun()
+                                 # else: Error handled in save_users
+                            else: st.error("Current user data error.") # Data consistency issue
+                        else: st.warning(f"`{add_ticker_input}` invalid.")
+                    except Exception as e: st.warning(f"Validation error: {e}")
+                elif not add_ticker_input: st.warning("Enter ticker.")
+                else: st.warning("Already in watchlist.")
+
+            remove_ticker_select = st.selectbox("Remove Ticker", [""] + sorted(user_watchlist), key="remove_ticker")
+            if st.button("Remove"): # Remove Button Logic
+                if remove_ticker_select and remove_ticker_select in user_watchlist:
+                    user_watchlist.remove(remove_ticker_select)
+                    users_data = load_users()
+                    if st.session_state['name'] in users_data:
+                        users_data[st.session_state['name']]['watchlist'] = sorted(user_watchlist)
+                        if save_users(users_data):
+                            st.session_state['watchlist'] = sorted(user_watchlist) # Update state
+                            st.success(f"`{remove_ticker_select}` removed.")
+                            st.rerun()
+                        # else: Error handled in save_users
+                    else: st.error("Current user data error.")
+                elif not remove_ticker_select: st.warning("Select ticker.")
+        # --- End Watchlist ---
+
+        st.divider()
+        # Combine popular and user watchlist for the main dropdown
+        available_tickers = sorted(list(set(POPULAR_TICKERS + user_watchlist)))
+
+        # Use session state selected_ticker for default value
+        try: default_index = ([''] + available_tickers).index(st.session_state.get('selected_ticker', ''))
+        except ValueError: default_index = 0
+
+        # Main Ticker Selector (in sidebar)
+        ticker_sb = st.selectbox(
+            '📊 Select/Search Stock',
+            options=[''] + available_tickers,
+            index=default_index, # Set based on session state
+            placeholder="Type or select...",
+            help="Select or type a stock ticker symbol",
+            key="main_ticker_selector_sidebar"
+        ).strip().upper()
+
+        # Update session state if sidebar selector changes
+        if ticker_sb != st.session_state.selected_ticker:
+             st.session_state.selected_ticker = ticker_sb
+             # Clear analysis state when ticker changes
+             keys_to_clear = ['stock_data', 'stock_info', 'prediction', 'prediction_fig', 'analyzed_df', 'gemini_summary', 'summary_ticker', 'loaded_ticker', 'analysis_ticker']
+             for key in keys_to_clear:
+                 if key in st.session_state: del st.session_state[key]
+             # --- ⚙️ Reset auto-run flag if main dropdown used ---
+             st.session_state.run_analysis_on_select = False
+             st.session_state.load_data_on_select = False # Reset auto-load flag
+             st.rerun() # Rerun immediately
+
+        # Final ticker assignment from session state
+        ticker = st.session_state.selected_ticker
+
+        st.divider()
+        # Analysis Options
+        st.subheader("Analysis Options")
+        forecast_days = st.slider("Forecast Period (days)", 7, 90, 30, 1, help="Prediction length")
+        lookback_period = st.selectbox("Historical Period", ['3mo', '6mo', '1y', '2y', '5y'], 1, help="Chart & AI data (Min 6mo for AI)") # Index 1 = 6mo
+
+        st.divider()
+        # Action Buttons
+        run_analysis_button = st.button('🚀 Run Full Analysis', type='primary', use_container_width=True)
+        refresh_data_button = st.button('🔄 Refresh Hist. Data', use_container_width=True)
+
+    # --- Main Content Area (Logged In) ---
+    st.markdown('<h1 class="main-header">🧠 SynapseStreet</h1>', unsafe_allow_html=True) # Show title in main area too
+    st.markdown("*AI-Powered Stock Analysis combining Sentiment & Machine Learning*")
+
+    if not ticker:
+        # Landing Page (Logged In, No Ticker Selected)
+        st.info("👈 Select a stock ticker from the sidebar.")
+        # ... (Quick Access Buttons) ...
+        st.divider(); st.subheader("🔥 Quick Access")
+        quick_cols = st.columns(6); quick_tickers = ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA', 'AMZN']
+        for idx, qt in enumerate(quick_tickers):
+            with quick_cols[idx]:
+                if st.button(qt, key=f"quick_{qt}", use_container_width=True):
+                    st.session_state.selected_ticker = qt
+                    st.session_state.run_analysis_on_select = True # Also auto-run
+                    st.session_state.load_data_on_select = True # Also auto-load
+                    # Clear previous analysis data
+                    keys_to_clear_quick = ['stock_data', 'stock_info', 'prediction', 'prediction_fig', 'analyzed_df', 'gemini_summary', 'summary_ticker', 'loaded_ticker', 'analysis_ticker']
+                    for key in keys_to_clear_quick:
+                        if key in st.session_state: del st.session_state[key]
+                    st.rerun()
+
+    else:
+        # --- Main Analysis Interface ---
+        st.markdown(f"## Analysis for *{ticker}*")
+        currency_symbol = "₹" if ticker.endswith(".NS") else "$"
+
+        tab_titles = ["📊 Historical", "🔮 AI Predict", "📰 News/Tally", "📈 Technicals", "🧩 AI Summary", "🏢 Profile"]
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(tab_titles)
+
+        # Helper function
+        def get_start_date_from_period(period_str):
+            today=datetime.now(); days_map = {'3mo':90,'6mo':182,'1y':365,'2y':730,'5y':1825}
+            delta = timedelta(days=days_map.get(period_str, 365)); return today - delta
+
+        # --- TAB 1: Historical Data ---
+        with tab1:
+            st.subheader(f"Historical Stock Data - {ticker}")
+            # --- Data Loading Logic ---
+            load_trigger = refresh_data_button or ('stock_data' not in st.session_state or st.session_state.get('loaded_ticker') != ticker) or st.session_state.get('load_data_on_select', False)
+            if run_analysis_button and ('stock_data' not in st.session_state or st.session_state.get('loaded_ticker') != ticker): load_trigger = True # Force load if analysis clicked and no data
+
+            print(f"--- DEBUG (Tab 1) --- Load Trigger: {load_trigger}, Refresh: {refresh_data_button}, Load Flag: {st.session_state.get('load_data_on_select', False)}, Ticker Match: {st.session_state.get('loaded_ticker') == ticker}")
+
+            if load_trigger:
                 try:
-                    with st.spinner("🧠 Gemini is analyzing the data..."):
-                        prediction_data = st.session_state.prediction
-                        sentiment_df = st.session_state.analyzed_df
-                        stock_df = st.session_state.stock_data
+                    # Reset load flag *before* loading
+                    st.session_state.load_data_on_select = False
+                    print("--- DEBUG (Tab 1) --- Reset load_data_on_select flag.")
 
-                        current_price = stock_df['Close'].iloc[-1]
-                        day_change_pct = ((stock_df['Close'].iloc[-1] / stock_df['Close'].iloc[-2]) - 1) * 100
-                        period_high = stock_df['High'].max()
-                        
-                        trend = prediction_data.get('trend', 'N/A')
-                        avg_sentiment = prediction_data.get('avg_sentiment', 0.0)
-                        target_30d = prediction_data.get('target_30d', 'N/A')
-                        change_30d = prediction_data.get('predicted_change_30d', 'N/A')
-                        confidence = prediction_data.get('confidence', 'N/A')
+                    start_date = get_start_date_from_period(lookback_period); start_date_str = start_date.strftime('%Y-%m-%d')
+                    with st.spinner(f'Fetching data since {start_date_str}...'): df = get_stock_data(ticker, start=start_date_str)
+                    if df is None or df.empty: st.error(f'No data for *{ticker}*.'); df = None
+                    else: st.success(f'✅ Fetched {len(df)} rows.')
+                    st.session_state.stock_data = df; st.session_state.loaded_ticker = ticker
+                    if df is not None:
+                         with st.spinner("Fetching profile..."): stock_info = yf.Ticker(ticker).info; st.session_state.stock_info = stock_info
+                    else:
+                         if 'stock_info' in st.session_state: del st.session_state.stock_info
+                    # Clear analysis state ONLY if refresh button pressed
+                    if refresh_data_button:
+                         keys_to_clear_analysis = ['prediction', 'prediction_fig', 'analyzed_df', 'gemini_summary', 'summary_ticker', 'analysis_ticker']
+                         for key in keys_to_clear_analysis:
+                             if key in st.session_state: del st.session_state[key]
+                    st.rerun() # Rerun needed after loading
+                except Exception as e: st.error(f'❌ Fetch error: {e}'); st.exception(e); st.session_state.stock_data = None; st.session_state.loaded_ticker = ticker; st.session_state.load_data_on_select = False;
 
-                        positive_count = 0
-                        neutral_count = 0
-                        negative_count = 0
-                        if not sentiment_df.empty and 'sentiment' in sentiment_df.columns:
-                            sentiment_counts = sentiment_df['sentiment'].value_counts()
-                            positive_count = int(sentiment_counts.get('positive', 0) + sentiment_counts.get('POSITIVE', 0))
-                            neutral_count = int(sentiment_counts.get('neutral', 0) + sentiment_counts.get('NEUTRAL', 0))
-                            negative_count = int(sentiment_counts.get('negative', 0) + sentiment_counts.get('NEGATIVE', 0))
-
-                        prompt = f"""
-                        You are an expert financial analyst. Your task is to provide a concise, insightful summary for a retail investor based on the provided data for the stock ticker: {ticker}.
-                        
-                        *Do not just list the data.* You must synthesize it into a coherent narrative. Explain what the data means in combination.
-                        
-                        Here is the data:
-                        *1. Current Market Data (Currency: {currency_symbol}):* - Current Price: {currency_symbol}{current_price:.2f} - Period High ({lookback_period}): {currency_symbol}{period_high:.2f} - Today's Change: {day_change_pct:+.2f}%
-                        *2. AI/ML Prediction (XGBoost Model):* - Predicted Trend: {trend} - 30-Day Price Target: {target_30d} (Predicted Change: {change_30d}) - Model Confidence: {confidence}
-                        *3. News Sentiment Analysis (FinBERT Model):* - Average Sentiment Score: {avg_sentiment:+.3f} (where > 0 is positive, < 0 is negative) - News Article Tally: {positive_count} Positive, {neutral_count} Neutral, {negative_count} Negative
-                        
-                        *Your Task:* Write a 3-paragraph summary covering: 1. *Current Snapshot:* A brief on the stock's current price (in its correct currency) and recent performance. 2. *Sentiment & News:* What is the overall market sentiment (based on the average score) and how might this be influencing the stock? Briefly mention the news tally if available. 3. *Forward-Looking Outlook:* What does the AI prediction model suggest for the next 30 days? Combine the trend, target, and sentiment into a final concluding thought.
-                        
-                        Format the output as clean markdown.
-                        """
-                        response = gemini_model.generate_content(prompt)
-                        st.markdown(response.text)
-                        st.session_state.gemini_summary = response.text
-
-                except Exception as e:
-                    st.error(f"❌ Error generating Gemini summary: {e}")
-                    st.exception(e)
-        
-        elif 'gemini_summary' in st.session_state: st.markdown(st.session_state.gemini_summary)
-        else: st.info("Click the 'Generate AI Summary' button to get an AI-powered insight combining all analysis.")
-    
-    # ----------------------------
-    # TAB 6: Company Profile
-    # ----------------------------
-    with tab6:
-        st.subheader(f"🏢 Company Profile")
-        
-        if 'stock_info' not in st.session_state:
-            st.info("Please click 'Load Historical Data' in Tab 1 to fetch company profile.")
-        else:
-            stock_info = st.session_state.stock_info
-            
-            st.header(stock_info.get('longName', ticker))
-            
-            col1, col2 = st.columns(2)
-            with col1:
-                st.caption(f"*Sector:* {stock_info.get('sector', 'N/A')}")
-                st.caption(f"*Industry:* {stock_info.get('industry', 'N/A')}")
-            with col2:
-                st.caption(f"*Website:* {stock_info.get('website', 'N/A')}")
-                st.caption(f"*Country:* {stock_info.get('country', 'N/A')}")
-
-            st.divider()
-            
-            st.subheader("Business Summary")
-            st.markdown(stock_info.get('longBusinessSummary', 'No summary available.'))
-            
-            st.divider()
-            
-            st.subheader("Key Financials")
-            col1, col2, col3 = st.columns(3)
-            # Helper function for safe metric display
-            def safe_metric(value):
-                return f'{value:.2f}' if isinstance(value, (int, float)) else 'N/A'
-                
-            with col1:
-                st.metric("Market Cap", f"{currency_symbol}{stock_info.get('marketCap', 0)/1e9:.2f}B")
-                st.metric("Enterprise Value", f"{currency_symbol}{stock_info.get('enterpriseValue', 0)/1e9:.2f}B")
-            with col2:
-                st.metric("Trailing P/E", safe_metric(stock_info.get('trailingPE')))
-                st.metric("Forward P/E", safe_metric(stock_info.get('forwardPE')))
-            with col3:
-                st.metric("Dividend Yield", f"{stock_info.get('dividendYield', 0) * 100:.2f}%")
-                st.metric("Beta", safe_metric(stock_info.get('beta')))
-            
-            st.divider()
-            
-            st.subheader("Analyst Recommendations")
-            try:
-                with st.spinner("Loading analyst recommendations..."):
-                    recs = yf.Ticker(ticker).recommendations
-                if recs is not None and not recs.empty:
-                    st.dataframe(recs.tail(10), use_container_width=True)
+            # --- Display Data ---
+            if 'stock_data' in st.session_state and st.session_state.stock_data is not None and st.session_state.loaded_ticker == ticker:
+                df = st.session_state.stock_data
+                # ... (Display Metrics, Table, Chart Toggle - same as before) ...
+                if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.to_flat_index(); df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
+                col1, col2, col3, col4 = st.columns(4)
+                with col1: current_price = df['Close'].iloc[-1]; st.metric("Current Price", f"{currency_symbol}{current_price:.2f}")
+                if len(df) > 1:
+                    with col2: day_change = df['Close'].iloc[-1] - df['Close'].iloc[-2]; day_change_pct = (day_change / df['Close'].iloc[-2]) * 100 if df['Close'].iloc[-2] !=0 else 0; st.metric("Day Change", f"{currency_symbol}{day_change:.2f}", f"{day_change_pct:+.2f}%")
                 else:
-                    st.info("No analyst recommendations available for this stock.")
-            except Exception as e:
-                st.warning(f"Could not load analyst recommendations: {e}")
+                    with col2: st.metric("Day Change", "N/A")
+                    with col3: period_high = df['High'].max(); st.metric(f"Period High ({lookback_period})", f"{currency_symbol}{period_high:.2f}")
+                    with col4: avg_volume = df['Volume'].tail(20).mean(); st.metric("Avg Vol (20D)", f"{avg_volume/1e6:.2f}M" if avg_volume else "N/A")
+                st.divider(); st.subheader(f"Data Table ({lookback_period})"); st.dataframe(df, use_container_width=True, height=400)
+                st.divider(); col1c, col2c = st.columns([3, 1]);
+                with col1c: st.subheader(f"Price History ({lookback_period})")
+                with col2c: chart_type_tab1 = st.radio("Chart Type", ["Line", "Candlestick"], horizontal=True, key="chart_toggle_tab1", label_visibility="collapsed")
+                if chart_type_tab1 == "Line": st.line_chart(df['Close'], use_container_width=True)
+                else: fig = go.Figure(data=[go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name=ticker)]); fig.update_layout(xaxis_rangeslider_visible=False, yaxis_title=f"Price ({currency_symbol})"); st.plotly_chart(fig, use_container_width=True)
+
+            elif 'stock_data' in st.session_state and st.session_state.stock_data is None and st.session_state.loaded_ticker == ticker: st.error(f"Failed to load data for {ticker}.")
+            else: st.info("Load historical data using sidebar button.")
+
+
+        # --- TAB 2: AI Predictions ---
+        with tab2:
+            st.subheader(f"🔮 AI Predictions - {ticker}")
+            # --- Trigger Logic ---
+            should_run_analysis = run_analysis_button or st.session_state.get('run_analysis_on_select', False)
+            print(f"--- DEBUG (Tab 2) --- Should Run: {should_run_analysis}, Auto Flag: {st.session_state.get('run_analysis_on_select', False)}, Button: {run_analysis_button}")
+
+            if should_run_analysis:
+                st.session_state.run_analysis_on_select = False # Reset flag
+                print("--- DEBUG (Tab 2) --- Auto-run flag reset.")
+
+                if lookback_period in ['1mo', '3mo']: st.error("❌ Min '6mo' required for AI.")
+                elif 'stock_data' not in st.session_state or st.session_state.stock_data is None or st.session_state.get('loaded_ticker') != ticker:
+                     if should_run_analysis and not run_analysis_button: # Auto-trigger specific message
+                         st.warning("⚠️ Data needs loading first. Click 'Load Historical Data' in Tab 1 or sidebar button.")
+                     else: # Manual button press message
+                         st.warning("⚠️ Load/refresh valid historical data first (Tab 1 or sidebar).")
+                else: # Data ready, run analysis
+                    try:
+                        with st.spinner(f'🧠 Running AI analysis...'): analyzed_df, prediction, fig = nlp_sentiment_pipeline(ticker, forecast_days=forecast_days, lookback_period=lookback_period)
+                        st.session_state.prediction = prediction; st.session_state.prediction_fig = fig; st.session_state.analyzed_df = analyzed_df; st.session_state.analysis_ticker = ticker
+                        print(f"--- DEBUG (Tab 2) --- Analysis SUCCESS. Stored results for ticker: {ticker}")
+                        if fig is None: st.error(f"Pred failed: {prediction.get('error', 'Unknown')}")
+                        else: st.success("✅ Pred ready!"); st.rerun() # Rerun to display
+                    except Exception as e: 
+                        st.error(f"❌ Pred error: {e}"); st.exception(e); # ... (clear state on error) ...
+                        keys_to_clear_fail = ['prediction', 'prediction_fig', 'analyzed_df']
+                        for key in keys_to_clear_fail:
+                            if key in st.session_state: del st.session_state[key]
+                        st.session_state.analysis_ticker = ticker
+
+            # --- Display Logic ---
+            if 'prediction_fig' in st.session_state and st.session_state.prediction_fig is not None and 'prediction' in st.session_state and st.session_state.get('analysis_ticker') == ticker:
+                prediction = st.session_state.prediction; fig = st.session_state.prediction_fig
+                # ... (Display metrics, confidence, chart, details, save button - same as before) ...
+                col1, col2, col3, col4 = st.columns(4);
+                with col1: st.metric("Trend", prediction.get('trend', 'N/A'))
+                with col2: st.metric("Sentiment", f"{prediction.get('avg_sentiment', 0):+.3f}")
+                with col3: st.metric("7D Target", prediction.get('target_7d', 'N/A'), prediction.get('predicted_change_7d', 'N/A'))
+                with col4: st.metric("30D Target", prediction.get('target_30d', 'N/A'), prediction.get('predicted_change_30d', 'N/A'))
+                st.divider(); confidence = prediction.get('confidence', 'Unknown');
+                if confidence == 'High': st.success(f"🎯 Confidence: **{confidence}**")
+                elif confidence == 'Medium': st.info(f"📊 Confidence: **{confidence}**")
+                else: st.warning(f"⚠️ Confidence: **{confidence}**")
+                st.divider(); st.plotly_chart(fig, use_container_width=True)
+                with st.expander("📋 Details"): st.json(prediction)
+                if st.button("💾 Save Chart", key="save_chart_btn"):
+                     if fig: os.makedirs("predictions", exist_ok=True); fpath = f"predictions/{ticker}_forecast_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"; fig.write_html(fpath); st.success(f"✅ Saved to {fpath}")
+
+            elif 'prediction' in st.session_state and st.session_state.prediction and st.session_state.prediction.get('error') and st.session_state.get('analysis_ticker') == ticker: st.error(f"Pred failed: {st.session_state.prediction.get('error')}")
+            else: st.info("Click 'Run Full Analysis' or select from Watchlist to run analysis.")
+
+
+        # --- Tabs 3-6 (Ensure checks for session state data and ticker match) ---
+        with tab3: # --- TAB 3: News & Sentiment ---
+            st.subheader(f"📰 News Sentiment Analysis - {ticker}")
+            def highlight_sentiment(row):
+                sv=row.get('sentiment_value',0);color='#080808'; # ... (highlight logic) ...
+                if sv > 0: color='#008B8B';
+                elif sv < 0: color='#E44D2E';
+                return [f'background-color: {color}'] * len(row)
+            if 'analyzed_df' in st.session_state and st.session_state.get('analysis_ticker') == ticker:
+                 analyzed_df_display = st.session_state.analyzed_df
+                 if analyzed_df_display is not None and not analyzed_df_display.empty: # ... (Display distribution and details) ...
+                     st.divider(); st.subheader("Distribution"); sentiment_counts = analyzed_df_display['sentiment'].value_counts()
+                     col1, col2, col3 = st.columns(3);
+                     with col1: positive = sentiment_counts.get('positive', 0) + sentiment_counts.get('POSITIVE', 0); st.metric("🟢 Pos", positive)
+                     with col2: neutral = sentiment_counts.get('neutral', 0) + sentiment_counts.get('NEUTRAL', 0); st.metric("🟡 Neu", neutral)
+                     with col3: negative = sentiment_counts.get('negative', 0) + sentiment_counts.get('NEGATIVE', 0); st.metric("🔴 Neg", negative)
+                     st.divider(); st.subheader("Detailed Breakdown")
+                     display_cols_news = ['timestamp', 'title', 'sentiment', 'score', 'sentiment_value', 'source']; display_df_news = analyzed_df_display[[col for col in display_cols_news if col in analyzed_df_display.columns]].copy()
+                     if 'timestamp' in display_df_news.columns: display_df_news['timestamp'] = pd.to_datetime(display_df_news['timestamp']).dt.strftime('%Y-%m-%d %H:%M'); display_df_news.rename(columns={'timestamp': 'Date/Time'}, inplace=True)
+                     st.dataframe(display_df_news.style.apply(highlight_sentiment, axis=1), use_container_width=True, height=400, hide_index=True)
+                 elif analyzed_df_display is not None and analyzed_df_display.empty : st.info("No news found last run.")
+            else: st.info("Click 'Run Full Analysis'.")
+
+        with tab4: # --- TAB 4: Technical Indicators ---
+             st.subheader(f"📈 Technical Indicators - {ticker}")
+             if 'stock_data' in st.session_state and st.session_state.stock_data is not None and st.session_state.loaded_ticker == ticker:
+                 df_tech = st.session_state.stock_data.copy()
+                 if not all(col in df_tech.columns for col in ['Close', 'Open', 'High', 'Low']): st.warning("Missing OHLC columns.")
+                 else:
+                     try: # ... (Calculate MAs) ...
+                         df_tech['MA_20'] = df_tech['Close'].rolling(window=20, min_periods=1).mean(); df_tech['MA_50'] = df_tech['Close'].rolling(window=50, min_periods=1).mean(); df_tech['MA_200'] = df_tech['Close'].rolling(window=200, min_periods=1).mean()
+                     except Exception as e_ma: st.warning(f"MA calc error: {e_ma}"); df_tech['MA_20']=None; df_tech['MA_50']=None; df_tech['MA_200']=None
+                     chart_col1_t4, chart_col2_t4 = st.columns([3, 1]); # ... (Chart toggle) ...
+                     with chart_col1_t4: st.subheader("Price vs. MAs")
+                     with chart_col2_t4: chart_type_tab4 = st.radio("Chart Type", ["Line", "Candle"], horizontal=True, key="chart_toggle_tab4", label_visibility="collapsed")
+                     chart_df_tech = df_tech.tail(252)
+                     if chart_type_tab4 == "Line": st.line_chart(chart_df_tech[['Close', 'MA_20', 'MA_50', 'MA_200']], use_container_width=True)
+                     else: # ... (Candlestick + MAs plot) ...
+                         fig_tech = go.Figure();
+                         fig_tech.add_trace(go.Candlestick(x=chart_df_tech.index, open=chart_df_tech['Open'], high=chart_df_tech['High'], low=chart_df_tech['Low'], close=chart_df_tech['Close'], name="Price"));
+                         if 'MA_20' in chart_df_tech.columns and chart_df_tech['MA_20'].notna().any(): fig_tech.add_trace(go.Scatter(x=chart_df_tech.index, y=chart_df_tech['MA_20'], mode='lines', name='MA 20', line=dict(color='yellow', width=1)));
+                         if 'MA_50' in chart_df_tech.columns and chart_df_tech['MA_50'].notna().any(): fig_tech.add_trace(go.Scatter(x=chart_df_tech.index, y=chart_df_tech['MA_50'], mode='lines', name='MA 50', line=dict(color='orange', width=1)));
+                         if 'MA_200' in chart_df_tech.columns and chart_df_tech['MA_200'].notna().any(): fig_tech.add_trace(go.Scatter(x=chart_df_tech.index, y=chart_df_tech['MA_200'], mode='lines', name='MA 200', line=dict(color='red', width=1)));
+                         fig_tech.update_layout(xaxis_rangeslider_visible=False, yaxis_title=f"Price ({currency_symbol})", legend_title="Legend"); st.plotly_chart(fig_tech, use_container_width=True)
+
+                     st.divider(); st.subheader("Current Values"); col1_tech, col2_tech, col3_tech = st.columns(3); # ... (Display MA metrics) ...
+                     with col1_tech: st.metric("20D MA", f"{currency_symbol}{df_tech['MA_20'].iloc[-1]:.2f}" if pd.notna(df_tech['MA_20'].iloc[-1]) else "N/A")
+                     with col2_tech: st.metric("50D MA", f"{currency_symbol}{df_tech['MA_50'].iloc[-1]:.2f}" if pd.notna(df_tech['MA_50'].iloc[-1]) else "N/A")
+                     with col3_tech: st.metric("200D MA", f"{currency_symbol}{df_tech['MA_200'].iloc[-1]:.2f}" if pd.notna(df_tech['MA_200'].iloc[-1]) else "N/A")
+             else: st.info("Load data (Tab 1) first.")
+
+        with tab5: # --- TAB 5: AI Summary ---
+            st.subheader(f"🧩 AI Summary - {ticker}")
+            # Check if Gemini is configured AND available
+            if not GEMINI_AVAILABLE or gemini_model is None: st.warning("⚠️ Gemini not configured.")
+            else:
+                if st.button("Generate AI Summary", key="gen_summary", type="primary", use_container_width=True):
+                    # Check required data exists for the CURRENT ticker
+                    data_ready = ('prediction' in st.session_state and st.session_state.prediction is not None and
+                                  'analyzed_df' in st.session_state and # Can be empty, must exist
+                                  'stock_data' in st.session_state and st.session_state.stock_data is not None and
+                                  st.session_state.get('loaded_ticker') == ticker and
+                                  st.session_state.get('analysis_ticker') == ticker)
+                    print(f"--- DEBUG (Tab 5) --- Data Ready Check: {data_ready}") # Debug check
+
+                    if not data_ready: st.warning("⚠️ Run 'Full Analysis' first.")
+                    else:
+                        try: # ... (Generate Summary Logic - same as before) ...
+                            with st.spinner("🧠 Gemini analyzing..."):
+                                prediction_data = st.session_state.prediction; sentiment_df = st.session_state.analyzed_df; stock_df = st.session_state.stock_data
+                                current_price = stock_df['Close'].iloc[-1]; day_change_pct = ((stock_df['Close'].iloc[-1] / stock_df['Close'].iloc[-2]) - 1) * 100 if len(stock_df)>1 and stock_df['Close'].iloc[-2] != 0 else 0; period_high = stock_df['High'].max()
+                                lookback_desc = lookback_period # Use sidebar variable
+                                trend = prediction_data.get('trend', 'N/A'); avg_sentiment = prediction_data.get('avg_sentiment', 0.0); target_30d = prediction_data.get('target_30d', 'N/A'); change_30d = prediction_data.get('predicted_change_30d', 'N/A'); confidence = prediction_data.get('confidence', 'N/A')
+                                positive_count=0; neutral_count=0; negative_count=0
+                                if sentiment_df is not None and not sentiment_df.empty and 'sentiment' in sentiment_df.columns: sentiment_counts = sentiment_df['sentiment'].value_counts(); positive_count = int(sentiment_counts.get('positive', 0) + sentiment_counts.get('POSITIVE', 0)); neutral_count = int(sentiment_counts.get('neutral', 0) + sentiment_counts.get('NEUTRAL', 0)); negative_count = int(sentiment_counts.get('negative', 0) + sentiment_counts.get('NEGATIVE', 0))
+                                prompt = f"""
+                                You are an expert financial analyst... [Your full prompt text here using variables]
+                                """
+                                response = gemini_model.generate_content(prompt); st.markdown(response.text); st.session_state.gemini_summary = response.text; st.session_state.summary_ticker = ticker
+                        except Exception as e: st.error(f"❌ Summary error: {e}"); st.exception(e)
+
+                elif 'gemini_summary' in st.session_state and st.session_state.get('summary_ticker') == ticker: st.markdown(st.session_state.gemini_summary)
+                else: st.info("Click 'Generate AI Summary'.")
+
+        with tab6: # --- TAB 6: Company Profile ---
+            st.subheader(f"🏢 Company Profile")
+            # Display requires stock_info *for the current ticker*
+            if 'stock_info' in st.session_state and st.session_state.loaded_ticker == ticker:
+                 stock_info_display = st.session_state.stock_info
+                 if stock_info_display:
+                     # ... (Display profile info, financials, recommendations - same as before) ...
+                     st.header(stock_info_display.get('longName', ticker))
+                     col1_prof, col2_prof = st.columns(2);
+                     with col1_prof: st.caption(f"**Sector:** {stock_info_display.get('sector', 'N/A')}"); st.caption(f"**Industry:** {stock_info_display.get('industry', 'N/A')}")
+                     with col2_prof: st.caption(f"**Website:** {stock_info_display.get('website', 'N/A')}"); st.caption(f"**Country:** {stock_info_display.get('country', 'N/A')}")
+                     st.divider(); st.subheader("Summary"); st.markdown(stock_info_display.get('longBusinessSummary', 'N/A'))
+                     st.divider(); st.subheader("Financials"); col1_fin, col2_fin, col3_fin = st.columns(3);
+                     mcap = stock_info_display.get('marketCap'); st.metric("Market Cap", f"{currency_symbol}{mcap/1e9:.2f}B" if mcap else "N/A")
+                     eval = stock_info_display.get('enterpriseValue'); st.metric("Ent Value", f"{currency_symbol}{eval/1e9:.2f}B" if eval else "N/A")
+                     tpe = stock_info_display.get('trailingPE'); st.metric("Trailing P/E", f"{tpe:.2f}" if isinstance(tpe, (int, float)) else 'N/A')
+                     fpe = stock_info_display.get('forwardPE'); st.metric("Forward P/E", f"{fpe:.2f}" if isinstance(fpe, (int, float)) else 'N/A')
+                     dyield = stock_info_display.get('dividendYield'); st.metric("Div Yield", f"{dyield * 100:.2f}%" if dyield else "N/A")
+                     beta_val = stock_info_display.get('beta'); st.metric("Beta", f"{beta_val:.2f}" if isinstance(beta_val, (int, float)) else 'N/A')
+                     st.divider(); st.subheader("Recommendations");
+                     try:
+                         with st.spinner("Loading..."): recs = yf.Ticker(ticker).recommendations
+                         if recs is not None and not recs.empty: st.dataframe(recs.tail(10), use_container_width=True)
+                         else: st.info("None available.")
+                     except Exception as e: st.warning(f"Could not load: {e}")
+                 else: st.warning(f"Profile info unavailable.")
+            else: st.info("Load data (Tab 1) first.")
+        # --- End Main Content Tabs ---
+
+    # --- End Logged-in code ---
+
+# --- Authentication States (Login Failed / Not Logged In but Routed Wrong) ---
+# Redirect logic handled by the main routing check at the top
+# # and logout logic within the main app state.
+# elif st.session_state.get('authentication_status') == False: 
+#     login_page() # Rerender login page with error
+# elif st.session_state.get('authentication_status') is None and st.session_state.get('menu_selection') != 'Register': 
+#     login_page()
+
+# # --- Fallback for invalid state ---
+# elif st.session_state.get('menu_selection') not in ['Login', 'Register', 'App']: # <-- Colon corrected here
+#      st.error("Invalid app state. Resetting to login.")
+#      print(f"--- ERROR --- Invalid menu_selection state detected: {st.session_state.get('menu_selection')}") # Debug print
+#      st.session_state.menu_selection = 'Login' # Reset state variable used for routing
+#      # Clear potentially conflicting auth state
+#      keys_to_clear_fallback = ['authentication_status', 'name', 'username', 'watchlist']
+#      for key in keys_to_clear_fallback:
+#          if key in st.session_state: del st.session_state[key]
+#      st.rerun()
+
+# --- App Footer (Optional) ---
+# st.markdown("---")
+# st.caption("SynapseStreet vX.Y")
