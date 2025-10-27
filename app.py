@@ -588,7 +588,22 @@ else: # --- IF LOGGED IN, CONTINUE TO MAIN APP ---
                                 positive_count=0; neutral_count=0; negative_count=0
                                 if sentiment_df is not None and not sentiment_df.empty and 'sentiment' in sentiment_df.columns: sentiment_counts = sentiment_df['sentiment'].value_counts(); positive_count = int(sentiment_counts.get('positive', 0) + sentiment_counts.get('POSITIVE', 0)); neutral_count = int(sentiment_counts.get('neutral', 0) + sentiment_counts.get('NEUTRAL', 0)); negative_count = int(sentiment_counts.get('negative', 0) + sentiment_counts.get('NEGATIVE', 0))
                                 prompt = f"""
-                                You are an expert financial analyst... [Your full prompt text here using variables]
+                                You are an expert financial analyst with access to the latest market data. Your task is to provide a comprehensive analysis of the {ticker} stock based on the following information:
+
+                                - Current Price: {current_price}
+                                - Day Change (%): {day_change_pct}
+                                - Period High: {period_high}
+                                - Lookback Period: {lookback_desc}
+                                - Trend: {trend}
+                                - Average Sentiment: {avg_sentiment}
+                                - 30-Day Target: {target_30d}
+                                - 30-Day Change (%): {change_30d}
+                                - Confidence: {confidence}
+                                - Positive Mentions: {positive_count}
+                                - Neutral Mentions: {neutral_count}
+                                - Negative Mentions: {negative_count}
+
+                                Please provide your analysis in a clear and concise manner.
                                 """
                                 response = gemini_model.generate_content(prompt); st.markdown(response.text); st.session_state.gemini_summary = response.text; st.session_state.summary_ticker = ticker
                         except Exception as e: st.error(f"❌ Summary error: {e}"); st.exception(e)
