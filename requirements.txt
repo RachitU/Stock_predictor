@@ -1,6 +1,7 @@
 # Core Web App
 streamlit
 pandas
+yfinance
 numpy
 requests
 feedparser
