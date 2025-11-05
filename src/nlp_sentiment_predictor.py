@@ -5,34 +5,6 @@ from xgboost import XGBRegressor
 import streamlit as st
 
 # ------------------------------------------------------------
-# Feature Engineering
-# ------------------------------------------------------------
-
-def prepare_features(stock_df: pd.DataFrame, sentiment_value: float = 0.0) -> pd.DataFrame:
-    """Generate technical indicators + sentiment feature."""
-    df = stock_df.copy()
-    df['MA_5'] = df['Close'].rolling(window=5).mean()
-    df['MA_10'] = df['Close'].rolling(window=10).mean()
-    df['MA_20'] = df['Close'].rolling(window=20).mean()
-    df['RSI'] = compute_rsi(df['Close'], 14)
-    df['MACD'], df['MACD_signal'], df['MACD_diff'] = compute_macd(df['Close'])
-    df['volatility'] = df['Close'].rolling(window=10).std()
-    df['BB_upper'], df['BB_lower'], df['BB_width'] = compute_bollinger_bands(df['Close'])
-    df['ATR'] = compute_atr(df)
-    df['OBV'] = compute_obv(df)
-    df['sentiment_score'] = sentiment_value
-
-    # Lag features
-    for lag in [1, 2, 3, 5, 10]:
-        df[f'Close_lag_{lag}'] = df['Close'].shift(lag)
-
-    df['Target_T_plus_1'] = df['Close'].shift(-1)
-    df['day_of_week'] = df.index.dayofweek
-    df['month'] = df.index.month
-
-    return df.dropna()
-
-# ------------------------------------------------------------
 # Technical Indicator Helpers
 # ------------------------------------------------------------
 
@@ -64,7 +36,7 @@ def compute_atr(df, period=14):
     high_low = df['High'] - df['Low']
     high_close = np.abs(df['High'] - df['Close'].shift())
     low_close = np.abs(df['Low'] - df['Close'].shift())
-    tr = high_low.combine(high_close, np.maximum).combine(low_close, np.maximum)
+    tr = np.maximum(high_low, np.maximum(high_close, low_close))
     return tr.rolling(window=period).mean()
 
 def compute_obv(df):
@@ -72,7 +44,40 @@ def compute_obv(df):
     return obv.cumsum()
 
 # ------------------------------------------------------------
-# Main Model Training Function (Lightweight Version)
+# Feature Engineering
+# ------------------------------------------------------------
+
+def prepare_features(stock_df: pd.DataFrame, sentiment_value: float = 0.0) -> pd.DataFrame:
+    """Generate technical indicators + sentiment feature."""
+    df = stock_df.copy()
+
+    # Moving averages
+    df['MA_5'] = df['Close'].rolling(window=5).mean()
+    df['MA_10'] = df['Close'].rolling(window=10).mean()
+    df['MA_20'] = df['Close'].rolling(window=20).mean()
+
+    # Indicators
+    df['RSI'] = compute_rsi(df['Close'], 14)
+    df['MACD'], df['MACD_signal'], df['MACD_diff'] = compute_macd(df['Close'])
+    df['volatility'] = df['Close'].rolling(window=10).std()
+    df['BB_upper'], df['BB_lower'], df['BB_width'] = compute_bollinger_bands(df['Close'])
+    df['ATR'] = compute_atr(df)
+    df['OBV'] = compute_obv(df)
+    df['sentiment_score'] = sentiment_value
+
+    # Lag features
+    for lag in [1, 2, 3, 5, 10]:
+        df[f'Close_lag_{lag}'] = df['Close'].shift(lag)
+
+    # Targets + date features
+    df['Target_T_plus_1'] = df['Close'].shift(-1)
+    df['day_of_week'] = df.index.dayofweek
+    df['month'] = df.index.month
+
+    return df.dropna()
+
+# ------------------------------------------------------------
+# Model Training
 # ------------------------------------------------------------
 
 @st.cache_resource
