@@ -11,7 +11,7 @@ from src.config import db_available, db
 
 from src.data_collection import get_stock_data, scrape_multiple_news
 # Ensure pipeline is imported if used
-from src.nlp_sentiment_predictor import sentiment_pipeline as nlp_sentiment_pipeline
+from src.nlp_sentiment_predictor import nlp_sentiment_pipeline, analyze_sentiment # Import analyze_sentiment if needed separately
 from datetime import datetime, timedelta
 # Import Gemini if used
 import google.generativeai as genai
